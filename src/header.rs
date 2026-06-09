@@ -48,8 +48,12 @@ impl TableHeaderRowExt for TableRow<'_, '_> {
             ..Default::default()
         };
         let mut halt_error: Option<TableError> = None;
+        let mut is_hovered = false;
+
         let col_response = self
             .col(|ui| {
+                is_hovered = ui.rect_contains_pointer(ui.max_rect());
+
                 let item_spacing = ui.spacing().item_spacing;
                 let gapless_rect = ui.max_rect().expand2(0.5 * item_spacing);
                 ui.painter().rect_filled(
@@ -160,7 +164,7 @@ impl TableHeaderRowExt for TableRow<'_, '_> {
             return Err(err);
         }
 
-        if col_response.contains_pointer() {
+        if is_hovered {
             response.hovered = true;
         }
         if col_response.clicked() {
