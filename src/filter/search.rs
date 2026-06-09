@@ -1,3 +1,5 @@
+use fluent_zero::t;
+
 bitflags::bitflags! {
     /// Configuration flags for search behavior.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -183,7 +185,7 @@ impl<'a> SearchBar<'a> {
                         egui::Button::new(egui::RichText::new("Aa").monospace())
                             .selected(case_selected),
                     )
-                    .on_hover_text("Case Insensitive")
+                    .on_hover_text(t!("case-insensitive"))
                     .clicked()
                 {
                     search.toggle_option(SearchOptions::CASE_INSENSITIVE);
@@ -196,14 +198,14 @@ impl<'a> SearchBar<'a> {
                         egui::Button::new(egui::RichText::new(".*").monospace())
                             .selected(regex_selected),
                     )
-                    .on_hover_text("Regular Expression")
+                    .on_hover_text(t!("regular-expression"))
                     .clicked()
                 {
                     search.toggle_option(SearchOptions::REGEX);
                     changed = true;
                 }
 
-                if ui.button("❌").on_hover_text("Remove Filter").clicked() {
+                if ui.button("❌").on_hover_text(t!("remove-filter")).clicked() {
                     search.clear();
                     changed = true;
                 }

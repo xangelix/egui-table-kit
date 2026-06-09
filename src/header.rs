@@ -1,4 +1,5 @@
 use egui_extras::{Table, TableBuilder, TableRow};
+use fluent_zero::t;
 
 use super::{
     error::TableError,
@@ -109,17 +110,16 @@ impl TableHeaderRowExt for TableRow<'_, '_> {
                                     ui.set_width(width);
                                     set_menu_style(ui.style_mut());
 
-                                    ui.strong("Column Options");
+                                    ui.strong(t!("column-options"));
                                     ui.separator();
 
                                     // 1. Text Search
-                                    // SearchBar::ui handles the internal mutation of the Search struct
-                                    SearchBar::new("Text Filter")
+                                    SearchBar::new(&t!("filter-text"))
                                         .ui(ui, &mut response.filtering.search);
 
                                     // 2. Highlight Filter (Render ONLY if color palettes are provided)
                                     if (!org_colors.is_empty() || !user_colors.is_empty())
-                                        && HighlightFilter::new("Highlight Filter")
+                                        && HighlightFilter::new(&t!("new-highlight-filter"))
                                             .ui(
                                                 ui,
                                                 &mut response.filtering.highlight,
@@ -138,15 +138,13 @@ impl TableHeaderRowExt for TableRow<'_, '_> {
                                     ui.separator();
 
                                     // 3. Sorting Options
+                                    let sort_desc = match sort_up {
+                                        Some(true) => format!(" {}", t!("current-ascending")),
+                                        Some(false) => format!(" {}", t!("current-descending")),
+                                        None => String::new(),
+                                    };
                                     if ui
-                                        .button(format!(
-                                            "Toggle Sort {}",
-                                            match sort_up {
-                                                Some(true) => "(Ascending)",
-                                                Some(false) => "(Descending)",
-                                                None => "",
-                                            }
-                                        ))
+                                        .button(format!("{} {sort_desc}", t!("toggle-sort")))
                                         .clicked()
                                     {
                                         response.to_sort = true;

@@ -22,11 +22,15 @@ bitflags = { version = "2", features = ["serde"] }
 compact_str = "0.9"
 egui = "0.34"
 egui_extras = { version = "0.34", default-features = false }
+fluent-zero = "0.1"
 parking_lot = { version = "0.12", features = ["hardware-lock-elision"] }
 regex = "1.12"
 roaring = { version = "0.11", features = ["serde", "simd"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+
+[build-dependencies]
+fluent-zero-build = "0.1.4"
 
 [dev-dependencies]
 eframe = "0.34.3"

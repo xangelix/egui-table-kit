@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use compact_str::ToCompactString as _;
+use fluent_zero::t;
 
 use super::{error::TableError, filter::Filter, state::TableState};
 
@@ -284,20 +285,20 @@ impl TableOperations {
                     op.poll(ui, data)?;
                 }
 
-                let (enabled, reason): (bool, &'static str) = if is_pending {
-                    (false, "Operation pending...")
+                let (enabled, reason): (bool, Cow<'static, str>) = if is_pending {
+                    (false, t!("operation-pending"))
                 } else {
                     match op.enabled() {
-                        TableOperationEnablement::Always => (true, ""),
+                        TableOperationEnablement::Always => (true, Cow::Borrowed("")),
                         TableOperationEnablement::AtLeastOneSelected => {
-                            (!data.selected_rows.is_empty(), "At least one row required")
+                            (!data.selected_rows.is_empty(), t!("operation-at-least-one"))
                         }
                         TableOperationEnablement::OneSelected => {
-                            (data.selected_rows.len() == 1, "Exactly one row required")
+                            (data.selected_rows.len() == 1, t!("operation-one"))
                         }
                         TableOperationEnablement::AtLeastOneFiltered => (
                             !data.active_rows.is_empty(),
-                            "At least one filtered row required",
+                            t!("operation-at-least-one-filtered"),
                         ),
                     }
                 };
@@ -446,7 +447,7 @@ pub trait TableOperation: std::any::Any + std::fmt::Debug + Send + Sync {
                             ui.add_space(10.0);
 
                             if let Some(error) = self.error() {
-                                ui.colored_label(egui::Color32::RED, "Error");
+                                ui.colored_label(egui::Color32::RED, t!("error"));
                                 ui.colored_label(egui::Color32::RED, error);
                             }
 
@@ -465,7 +466,7 @@ pub trait TableOperation: std::any::Any + std::fmt::Debug + Send + Sync {
                                         self.consume()?;
                                     }
                                 }
-                                if self.is_first_page() && ui.button("Cancel").clicked() {
+                                if self.is_first_page() && ui.button(t!("cancel")).clicked() {
                                     self.reset();
                                 }
                             }
@@ -504,14 +505,14 @@ pub trait TableOperation: std::any::Any + std::fmt::Debug + Send + Sync {
                             ui.add_space(5.0);
                             ui.spinner();
                         } else if let Some(error) = self.error() {
-                            ui.colored_label(egui::Color32::RED, "Error");
+                            ui.colored_label(egui::Color32::RED, t!("error"));
                             ui.colored_label(egui::Color32::RED, error);
                         } else {
                             input_ui(ui, self)?;
                         }
 
                         ui.add_space(10.0);
-                        if ui.button("Close").clicked() {
+                        if ui.button(t!("close")).clicked() {
                             self.reset();
                         }
                         Ok::<_, TableError>(())
@@ -544,9 +545,9 @@ impl TableOperation for CopyRows {
     }
     fn name(&self) -> Cow<'_, str> {
         if self.prioritize_hovers {
-            Cow::Borrowed("Copy hovered rows")
+            t!("copy-hovered-rows")
         } else {
-            Cow::Borrowed("Copy rows")
+            t!("copy-rows")
         }
     }
     fn icon(&self) -> &'static str {
@@ -603,9 +604,9 @@ impl TableOperation for CopyHeadersRows {
     }
     fn name(&self) -> Cow<'_, str> {
         if self.prioritize_hovers {
-            Cow::Borrowed("Copy hovered rows with headers")
+            t!("copy-hovered-rows-with-headers")
         } else {
-            Cow::Borrowed("Copy rows with headers")
+            t!("copy-rows-with-headers")
         }
     }
     fn icon(&self) -> &'static str {
@@ -671,7 +672,7 @@ impl TableOperation for FilterSelectAll {
         Self
     }
     fn name(&self) -> Cow<'_, str> {
-        Cow::Borrowed("Select filtered")
+        t!("select-filtered")
     }
     fn icon(&self) -> &'static str {
         "☑"
@@ -700,7 +701,7 @@ impl TableOperation for FilterDeSelectAll {
         Self
     }
     fn name(&self) -> Cow<'_, str> {
-        Cow::Borrowed("Deselect filtered")
+        t!("deselect-filtered")
     }
     fn icon(&self) -> &'static str {
         "❎"
@@ -730,7 +731,7 @@ impl TableOperation for SelectAll {
         Self
     }
     fn name(&self) -> Cow<'_, str> {
-        Cow::Borrowed("Select all")
+        t!("select-all")
     }
     fn icon(&self) -> &'static str {
         "✔"
@@ -761,7 +762,7 @@ impl TableOperation for DeSelectAll {
         Self
     }
     fn name(&self) -> Cow<'_, str> {
-        Cow::Borrowed("Deselect all")
+        t!("deselect-all")
     }
     fn icon(&self) -> &'static str {
         "❌"

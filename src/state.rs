@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Write as _};
 
 use compact_str::CompactString;
+use fluent_zero::t;
 use roaring::RoaringBitmap;
 
 use super::{
@@ -77,18 +78,19 @@ impl TableState {
 
     #[must_use]
     pub fn counts_header(&self, row_len: usize) -> String {
-        use std::fmt::Write;
         let mut counts = String::with_capacity(64);
-        let _ = write!(counts, "Total: {row_len}");
+        counts.push_str(&t!("total-rows", { "count" => row_len }));
 
         let active_rows_count = self.active_rows.len();
         if active_rows_count != row_len {
-            let _ = write!(counts, ", {active_rows_count} passing filter");
+            counts.push_str(", ");
+            let _ = write!(counts, "{active_rows_count} {}", t!("passing-filter"));
         }
 
         let selected_rows_count = self.selected_rows.len();
         if selected_rows_count != 0 {
-            let _ = write!(counts, ", {selected_rows_count} selected");
+            counts.push_str(", ");
+            let _ = write!(counts, "{selected_rows_count} {}", t!("selected"));
         }
 
         counts

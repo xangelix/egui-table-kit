@@ -1,5 +1,6 @@
 use std::sync::{Arc, LazyLock};
 
+use fluent_zero::t;
 use parking_lot::RwLock;
 
 use crate::error::TableError;
@@ -119,7 +120,7 @@ impl<'a> HighlightFilter<'a> {
                     highlight_options_r2,
                 )?;
 
-                if ui.button("❌").on_hover_text("Remove Filter").clicked() {
+                if ui.button("❌").on_hover_text(t!("remove-filter")).clicked() {
                     *highlight_select = None;
                 }
             } else if ui.button(self.label).clicked() {
