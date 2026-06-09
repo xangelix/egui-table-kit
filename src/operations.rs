@@ -397,15 +397,7 @@ pub trait TableOperation: std::any::Any + std::fmt::Debug + Send + Sync {
         false
     }
     fn set_modal_open(&mut self, _open: bool) {}
-    fn new() -> Self
-    where
-        Self: Sized;
-    fn reset(&mut self)
-    where
-        Self: Sized,
-    {
-        *self = Self::new();
-    }
+    fn reset(&mut self) {}
 
     fn pollable_modal(
         &mut self,
@@ -537,12 +529,6 @@ pub struct CopyRows {
 }
 
 impl TableOperation for CopyRows {
-    fn new() -> Self
-    where
-        Self: Sized,
-    {
-        Self::default()
-    }
     fn name(&self) -> Cow<'_, str> {
         if self.prioritize_hovers {
             t!("copy-hovered-rows")
@@ -596,12 +582,6 @@ pub struct CopyHeadersRows {
 }
 
 impl TableOperation for CopyHeadersRows {
-    fn new() -> Self
-    where
-        Self: Sized,
-    {
-        Self::default()
-    }
     fn name(&self) -> Cow<'_, str> {
         if self.prioritize_hovers {
             t!("copy-hovered-rows-with-headers")
@@ -665,12 +645,6 @@ impl TableOperation for CopyHeadersRows {
 pub struct FilterSelectAll;
 
 impl TableOperation for FilterSelectAll {
-    fn new() -> Self
-    where
-        Self: Sized,
-    {
-        Self
-    }
     fn name(&self) -> Cow<'_, str> {
         t!("select-filtered")
     }
@@ -694,12 +668,6 @@ impl TableOperation for FilterSelectAll {
 pub struct FilterDeSelectAll;
 
 impl TableOperation for FilterDeSelectAll {
-    fn new() -> Self
-    where
-        Self: Sized,
-    {
-        Self
-    }
     fn name(&self) -> Cow<'_, str> {
         t!("deselect-filtered")
     }
@@ -724,12 +692,6 @@ impl TableOperation for FilterDeSelectAll {
 pub struct SelectAll;
 
 impl TableOperation for SelectAll {
-    fn new() -> Self
-    where
-        Self: Sized,
-    {
-        Self
-    }
     fn name(&self) -> Cow<'_, str> {
         t!("select-all")
     }
@@ -755,12 +717,6 @@ impl TableOperation for SelectAll {
 pub struct DeSelectAll;
 
 impl TableOperation for DeSelectAll {
-    fn new() -> Self
-    where
-        Self: Sized,
-    {
-        Self
-    }
     fn name(&self) -> Cow<'_, str> {
         t!("deselect-all")
     }

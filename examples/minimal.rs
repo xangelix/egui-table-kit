@@ -18,9 +18,6 @@ pub struct TagSelected {
 }
 
 impl TableOperation for TagSelected {
-    fn new() -> Self {
-        Self { color_index: 0 }
-    }
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("Tag Selected")
     }
@@ -46,9 +43,6 @@ impl TableOperation for TagSelected {
 pub struct UntagSelected;
 
 impl TableOperation for UntagSelected {
-    fn new() -> Self {
-        Self
-    }
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("Untag Selected")
     }
@@ -145,15 +139,12 @@ impl Default for TableApp {
 
         // Group operations to establish separators
         let operations = TableOperations::new()
+            .with_group(vec![Box::new(SelectAll), Box::new(DeSelectAll)])
             .with_group(vec![
-                Box::new(SelectAll::new()),
-                Box::new(DeSelectAll::new()),
+                Box::new(TagSelected::default()),
+                Box::new(UntagSelected),
             ])
-            .with_group(vec![
-                Box::new(TagSelected::new()),
-                Box::new(UntagSelected::new()),
-            ])
-            .with_group(vec![Box::new(CopyRows::new())]);
+            .with_group(vec![Box::new(CopyRows::default())]);
 
         Self {
             provider,
