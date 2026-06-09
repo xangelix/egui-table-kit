@@ -263,7 +263,7 @@ impl TableOperations {
         }
         self
     }
-
+    /// Renders standard table operation buttons with default look.
     pub fn gui(
         &mut self,
         ui: &mut egui::Ui,
@@ -271,69 +271,81 @@ impl TableOperations {
         data: &mut TableState,
         context_menu: bool,
     ) -> Result<bool, TableError> {
+        self.gui_custom(
+            ui,
+            provider,
+            data,
+            context_menu,
+            |ui, op, enabled, reason, context_menu| {
+                ui.add_enabled_ui(enabled, |ui| {
+                    let mut button = ui
+                        .button(op.get_name(context_menu).as_ref())
+                        .on_hover_text(op.name());
+                    if !enabled {
+                        button = button.on_disabled_hover_text(format!("{}\n{reason}", op.name()));
+                    }
+                    button
+                })
+                .inner
+            },
+        )
+    }
+    /// Renders table operations using a custom button builder callback.
+    ///
+    /// This handles all the state machine details (polling, execution, pending modes, group separation)
+    /// but allows full control over the visual presentation of each button.
+    pub fn gui_custom<F>(
+        &mut self,
+        ui: &mut egui::Ui,
+        provider: &dyn TableProvider,
+        data: &mut TableState,
+        context_menu: bool,
+        mut button_renderer: F,
+    ) -> Result<bool, TableError>
+    where
+        F: FnMut(
+            &mut egui::Ui,
+            &mut Box<dyn TableOperation>,
+            bool, // enabled
+            &str, // localized disabled reason
+            bool, // context_menu
+        ) -> egui::Response,
+    {
         let mut refresh = false;
         let mut any_clicked = false;
-
-        for op_group in &mut self.0 {
+        let num_groups = self.0.len();
+        for (g_idx, op_group) in self.0.iter_mut().enumerate() {
             for op in op_group {
                 let is_pending = op.is_pending();
                 if op.just_completed() && op.refresh_on_completion() {
                     refresh = true;
                 }
-
                 if op.pollable() {
                     op.poll(ui, data)?;
                 }
-
-                let (enabled, reason): (bool, Cow<'static, str>) = if is_pending {
+                let (enabled, reason) = if is_pending {
                     (false, t!("operation-pending"))
                 } else {
-                    match op.enabled() {
-                        TableOperationEnablement::Always => (true, Cow::Borrowed("")),
-                        TableOperationEnablement::AtLeastOneSelected => {
-                            (!data.selected_rows.is_empty(), t!("operation-at-least-one"))
-                        }
-                        TableOperationEnablement::OneSelected => {
-                            (data.selected_rows.len() == 1, t!("operation-one"))
-                        }
-                        TableOperationEnablement::AtLeastOneFiltered => (
-                            !data.active_rows.is_empty(),
-                            t!("operation-at-least-one-filtered"),
-                        ),
-                    }
+                    op.evaluate_enablement(data)
                 };
-
                 if !context_menu {
                     op.extra_ui(ui, data)?;
                 }
-
-                ui.add_enabled_ui(enabled, |ui| {
-                    let mut button = ui
-                        .button(op.get_name(context_menu).as_ref())
-                        .on_hover_text(op.name());
-
-                    // Only format and allocate the error message string when disabled
-                    if !enabled {
-                        button = button.on_disabled_hover_text(format!("{}\n{reason}", op.name()));
-                    }
-
-                    if button.clicked() {
-                        any_clicked = true;
-                        let mut ctx = OperationContext { ui, data, provider };
-                        op.exec(&mut ctx)
-                    } else {
-                        Ok(())
-                    }
-                })
-                .inner?;
+                let response = button_renderer(ui, op, enabled, reason.as_ref(), context_menu);
+                if response.clicked() {
+                    any_clicked = true;
+                    let mut ctx = OperationContext { ui, data, provider };
+                    op.exec(&mut ctx)?;
+                }
             }
-            ui.separator();
+            // Draw group separators in standard toolbar view (non-context-menu)
+            if !context_menu && g_idx + 1 < num_groups {
+                ui.separator();
+            }
         }
-
         if any_clicked && context_menu {
             ui.close_kind(egui::UiKind::Menu);
         }
-
         Ok(refresh)
     }
 }
@@ -518,6 +530,25 @@ pub trait TableOperation: std::any::Any + std::fmt::Debug + Send + Sync {
 
     fn poll_allow_execution(&self) -> bool {
         true
+    }
+
+    /// Evaluates if the operation is enabled based on the current `TableState`,
+    /// returning a tuple of `(is_enabled, localized_disabled_reason)`.
+    fn evaluate_enablement(&self, state: &TableState) -> (bool, Cow<'static, str>) {
+        match self.enabled() {
+            TableOperationEnablement::Always => (true, Cow::Borrowed("")),
+            TableOperationEnablement::AtLeastOneSelected => (
+                !state.selected_rows.is_empty(),
+                t!("operation-at-least-one"),
+            ),
+            TableOperationEnablement::OneSelected => {
+                (state.selected_rows.len() == 1, t!("operation-one"))
+            }
+            TableOperationEnablement::AtLeastOneFiltered => (
+                !state.active_rows.is_empty(),
+                t!("operation-at-least-one-filtered"),
+            ),
+        }
     }
 }
 
