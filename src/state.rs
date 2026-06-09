@@ -149,7 +149,12 @@ impl TableState {
                         .columns
                         .get_mut(sort_col)
                         .ok_or(TableError::CorruptedState)?;
-                    column.sort_up = Some(!sort_up);
+
+                    let new_sort_up = !sort_up;
+                    column.sort_up = Some(new_sort_up);
+
+                    // Apply the sorted indices to active_rows in the new direction
+                    provider.sort_active_rows(&mut self.active_rows, sort_col, new_sort_up)?;
                 } else {
                     self.apply_new_sort(provider, sort_col)?;
                 }
