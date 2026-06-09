@@ -1,7 +1,7 @@
 [package]
 name = "egui-table-kit"
 description = "An extension for `egui` that brings batteries-included, filtering, highlighting, tree structures, and an action dispatch to your tables."
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT"
 documentation = "https://docs.rs/egui-table-kit"
