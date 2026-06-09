@@ -30,7 +30,7 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
 [build-dependencies]
-fluent-zero-build = "0.1.4"
+fluent-zero-build = "0.1"
 
 [dev-dependencies]
-eframe = "0.34.3"
+eframe = "0.34"
