@@ -8,7 +8,7 @@ selected = selected
 
 # Table Header
 column-options = Column Options
-filter-text = Filter Text
+filter-text = Filter Text 🔍
 case-insensitive = Case Insensitive
 remove-filter = Remove Filter
 new-highlight-filter = New Highlight Filter 〽

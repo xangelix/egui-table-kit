@@ -8,7 +8,7 @@ selected = 選択済み
 
 # Table Header
 column-options = 列 of オプション
-filter-text = テキストフィルタ
+filter-text = テキストフィルタ 🔍
 case-insensitive = 大文字・小文字を区別しない
 remove-filter = フィルタを解除
 new-highlight-filter = 新しいハイライトフィルタ 〽

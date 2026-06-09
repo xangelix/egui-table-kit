@@ -8,7 +8,7 @@ selected = 已選取
 
 # Table Header
 column-options = 欄位選項
-filter-text = 篩選文字
+filter-text = 篩選文字 🔍
 case-insensitive = 不區分大小寫
 remove-filter = 移除篩選條件
 new-highlight-filter = 新增強調篩選條件 〽

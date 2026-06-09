@@ -8,7 +8,7 @@ selected = चयनित
 
 # Table Header
 column-options = कॉलम विकल्प
-filter-text = टेक्स्ट फ़िल्टर करें
+filter-text = टेक्स्ट फ़िल्टर करें 🔍
 case-insensitive = केस असंवेदनशील (Case Insensitive)
 remove-filter = फ़िल्टर हटाएँ
 new-highlight-filter = नया हाईलाइट फ़िल्टर 〽

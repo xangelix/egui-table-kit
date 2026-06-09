@@ -8,7 +8,7 @@ selected = নির্বাচিত
 
 # Table Header
 column-options = কলাম অপশন
-filter-text = ফিল্টার টেক্সট
+filter-text = ফিল্টার টেক্সট 🔍
 case-insensitive = কেস ইনসেনসিটিভ (Case Insensitive)
 remove-filter = ফিল্টার সরান
 new-highlight-filter = নতুন হাইলাইট ফিল্টার 〽

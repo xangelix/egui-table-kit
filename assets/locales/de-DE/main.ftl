@@ -8,7 +8,7 @@ selected = ausgewählt
 
 # Table Header
 column-options = Spaltenoptionen
-filter-text = Filtertext
+filter-text = Filtertext 🔍
 case-insensitive = Groß-/Kleinschreibung ignorieren
 remove-filter = Filter entfernen
 new-highlight-filter = Neuer Hervorhebungsfilter 〽

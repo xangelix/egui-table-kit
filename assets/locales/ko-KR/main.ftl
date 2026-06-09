@@ -8,7 +8,7 @@ selected = 개 선택됨
 
 # Table Header
 column-options = 열 옵션
-filter-text = 텍스트 필터
+filter-text = 텍스트 필터 🔍
 case-insensitive = 대소문자 구분 안 함
 remove-filter = 필터 제거
 new-highlight-filter = 새 강조 필터 〽

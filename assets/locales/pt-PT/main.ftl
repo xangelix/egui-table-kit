@@ -8,7 +8,7 @@ selected = selecionadas
 
 # Table Header
 column-options = Opções da Coluna
-filter-text = Filtrar Texto
+filter-text = Filtrar Texto 🔍
 case-insensitive = Não distinguir maiúsculas/minúsculas
 remove-filter = Remover Filtro
 new-highlight-filter = Novo Filtro de Realce 〽
