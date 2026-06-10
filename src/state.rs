@@ -240,7 +240,7 @@ impl TableState {
 
             for i in 0..hierarchy.indent_level {
                 #[allow(clippy::cast_precision_loss)]
-                let x = (i as f32).mul_add(16.0, rect.min.x - spacing) + 8.0;
+                let x = (i as f32).mul_add(16.0, rect.min.x) + 8.0;
 
                 // Draw dashed guideline segments
                 let dash_length = 2.0;
@@ -286,8 +286,11 @@ impl TableState {
                 changed = true;
             }
         } else {
-            // Placeholder alignment spacing matching "⏵"
-            ui.add_space(16.0);
+            // Render an invisible, disabled placeholder label to reserve the exact layout footprint
+            let dummy_arrow = egui::RichText::new("⏵").color(egui::Color32::TRANSPARENT);
+            ui.add_enabled_ui(false, |ui| {
+                let _ = ui.selectable_label(false, dummy_arrow);
+            });
         }
 
         changed
