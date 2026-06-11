@@ -34,9 +34,6 @@ impl TableOperation for TagSelected {
         ctx.data.highlights_changed = true;
         Ok(())
     }
-    fn just_completed(&mut self) -> bool {
-        true
-    }
 }
 
 #[derive(Debug, Default)]
@@ -56,9 +53,6 @@ impl TableOperation for UntagSelected {
         ctx.data.highlights.remove_map(&ctx.data.selected_rows);
         ctx.data.highlights_changed = true;
         Ok(())
-    }
-    fn just_completed(&mut self) -> bool {
-        true
     }
 }
 

@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::HashSet};
 
 use compact_str::ToCompactString as _;
 use fluent_zero::t;
@@ -240,7 +240,11 @@ pub struct OperationContext<'a, 'b> {
 }
 
 #[derive(Debug, Default)]
-pub struct TableOperations(pub Vec<Vec<Box<dyn TableOperation>>>);
+pub struct TableOperations {
+    pub groups: Vec<Vec<Box<dyn TableOperation>>>,
+    pub pending_tracker: HashSet<(usize, usize)>,
+    pub last_tick: u64,
+}
 
 impl TableOperations {
     #[must_use]
@@ -250,19 +254,20 @@ impl TableOperations {
 
     #[must_use]
     pub fn with_group(mut self, group: Vec<Box<dyn TableOperation>>) -> Self {
-        self.0.push(group);
+        self.groups.push(group);
         self
     }
 
     #[must_use]
     pub fn with_operation(mut self, op: impl TableOperation + 'static) -> Self {
-        if let Some(group) = self.0.last_mut() {
+        if let Some(group) = self.groups.last_mut() {
             group.push(Box::new(op));
         } else {
-            self.0.push(vec![Box::new(op)]);
+            self.groups.push(vec![Box::new(op)]);
         }
         self
     }
+
     /// Renders standard table operation buttons with default look.
     pub fn gui(
         &mut self,
@@ -290,6 +295,7 @@ impl TableOperations {
             },
         )
     }
+
     /// Renders table operations using a custom button builder callback.
     ///
     /// This handles all the state machine details (polling, execution, pending modes, group separation)
@@ -313,13 +319,38 @@ impl TableOperations {
     {
         let mut refresh = false;
         let mut any_clicked = false;
-        let num_groups = self.0.len();
-        for (g_idx, op_group) in self.0.iter_mut().enumerate() {
+        let num_groups = self.groups.len();
+
+        // Evaluate state transitions exactly once per unique frame
+        let current_tick = ui.ctx().cumulative_frame_nr();
+        if self.last_tick != current_tick {
+            self.last_tick = current_tick;
+
+            for (g_idx, op_group) in self.groups.iter_mut().enumerate() {
+                for (op_idx, op) in op_group.iter_mut().enumerate() {
+                    let key = (g_idx, op_idx);
+                    let pending = op.is_pending();
+                    let was_pending = self.pending_tracker.contains(&key);
+
+                    if was_pending && !pending {
+                        self.pending_tracker.remove(&key);
+                        let success = op.error().is_none();
+                        op.on_completed(success);
+                        if op.refresh_on_completion() {
+                            refresh = true;
+                        }
+                    } else if !was_pending && pending {
+                        self.pending_tracker.insert(key);
+                    }
+                }
+            }
+        }
+
+        // Render operations and process interactions
+        for (g_idx, op_group) in self.groups.iter_mut().enumerate() {
             for op in op_group {
                 let is_pending = op.is_pending();
-                if op.just_completed() && op.refresh_on_completion() {
-                    refresh = true;
-                }
+
                 if op.pollable() {
                     op.poll(ui, data)?;
                 }
@@ -391,9 +422,10 @@ pub trait TableOperation: std::any::Any + std::fmt::Debug + Send + Sync {
     fn is_pending(&mut self) -> bool {
         false
     }
-    fn just_completed(&mut self) -> bool {
-        false
-    }
+
+    /// Event hook called exactly once when the operation transitions from pending to completed.
+    fn on_completed(&mut self, _success: bool) {}
+
     /// Routine tick loop, natively fired if `pollable()` evaluates to true.
     fn poll(&mut self, _ui: &mut egui::Ui, _data: &mut TableState) -> Result<(), TableError> {
         Ok(())
@@ -439,11 +471,6 @@ pub trait TableOperation: std::any::Any + std::fmt::Debug + Send + Sync {
                             );
                             ui.separator();
                             ui.spacing_mut().item_spacing.y = 5.0;
-
-                            if self.just_completed() && self.error().is_none() {
-                                self.reset();
-                                return Ok(());
-                            }
 
                             let is_pending = self.is_pending();
                             ui.add_enabled_ui(!is_pending, |ui| input_ui(ui, self))
@@ -602,9 +629,6 @@ impl TableOperation for CopyRows {
         ctx.ui.ctx().copy_text(output);
         Ok(())
     }
-    fn just_completed(&mut self) -> bool {
-        true
-    }
 }
 
 #[derive(Debug, Default)]
@@ -662,13 +686,9 @@ impl TableOperation for CopyHeadersRows {
             Ok(())
         })?;
 
-        // 3. Send the single allocated string to the clip board
+        // 3. Send the single allocated string to the clipboard
         ctx.ui.ctx().copy_text(output);
         Ok(())
-    }
-
-    fn just_completed(&mut self) -> bool {
-        true
     }
 }
 
@@ -690,9 +710,6 @@ impl TableOperation for FilterSelectAll {
         ctx.data.selected_rows.extend(active_u32_iter);
         Ok(())
     }
-    fn just_completed(&mut self) -> bool {
-        true
-    }
 }
 
 #[derive(Debug, Default)]
@@ -713,9 +730,6 @@ impl TableOperation for FilterDeSelectAll {
             ctx.data.selected_rows.remove(*row as u32);
         });
         Ok(())
-    }
-    fn just_completed(&mut self) -> bool {
-        true
     }
 }
 
@@ -739,9 +753,6 @@ impl TableOperation for SelectAll {
             .insert_range(0..ctx.provider.row_count() as u32);
         Ok(())
     }
-    fn just_completed(&mut self) -> bool {
-        true
-    }
 }
 
 #[derive(Debug, Default)]
@@ -760,8 +771,5 @@ impl TableOperation for DeSelectAll {
     fn exec(&mut self, ctx: &mut OperationContext<'_, '_>) -> Result<(), TableError> {
         ctx.data.selected_rows.clear();
         Ok(())
-    }
-    fn just_completed(&mut self) -> bool {
-        true
     }
 }
