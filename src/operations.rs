@@ -268,6 +268,36 @@ impl TableOperations {
         self
     }
 
+    /// Evaluates state transitions exactly once per unique frame tick.
+    /// Returns `true` if any completed operation requested a view refresh.
+    pub fn update(&mut self, ctx: &egui::Context) -> bool {
+        let mut refresh = false;
+        let current_tick = ctx.cumulative_frame_nr();
+        if self.last_tick != current_tick {
+            self.last_tick = current_tick;
+
+            for (g_idx, op_group) in self.groups.iter_mut().enumerate() {
+                for (op_idx, op) in op_group.iter_mut().enumerate() {
+                    let key = (g_idx, op_idx);
+                    let pending = op.is_pending();
+                    let was_pending = self.pending_tracker.contains(&key);
+
+                    if was_pending && !pending {
+                        self.pending_tracker.remove(&key);
+                        let success = op.error().is_none();
+                        op.on_completed(success);
+                        if op.refresh_on_completion() {
+                            refresh = true;
+                        }
+                    } else if !was_pending && pending {
+                        self.pending_tracker.insert(key);
+                    }
+                }
+            }
+        }
+        refresh
+    }
+
     /// Renders standard table operation buttons with default look.
     pub fn gui(
         &mut self,
@@ -317,34 +347,9 @@ impl TableOperations {
             bool, // context_menu
         ) -> egui::Response,
     {
-        let mut refresh = false;
+        let refresh = self.update(ui.ctx());
         let mut any_clicked = false;
         let num_groups = self.groups.len();
-
-        // Evaluate state transitions exactly once per unique frame
-        let current_tick = ui.ctx().cumulative_frame_nr();
-        if self.last_tick != current_tick {
-            self.last_tick = current_tick;
-
-            for (g_idx, op_group) in self.groups.iter_mut().enumerate() {
-                for (op_idx, op) in op_group.iter_mut().enumerate() {
-                    let key = (g_idx, op_idx);
-                    let pending = op.is_pending();
-                    let was_pending = self.pending_tracker.contains(&key);
-
-                    if was_pending && !pending {
-                        self.pending_tracker.remove(&key);
-                        let success = op.error().is_none();
-                        op.on_completed(success);
-                        if op.refresh_on_completion() {
-                            refresh = true;
-                        }
-                    } else if !was_pending && pending {
-                        self.pending_tracker.insert(key);
-                    }
-                }
-            }
-        }
 
         // Render operations and process interactions
         for (g_idx, op_group) in self.groups.iter_mut().enumerate() {
@@ -369,14 +374,126 @@ impl TableOperations {
                     op.exec(&mut ctx)?;
                 }
             }
-            // Draw group separators in standard toolbar view (non-context-menu)
-            if !context_menu && g_idx + 1 < num_groups {
+            // Draw group separators in standard layouts and menus alike
+            if g_idx + 1 < num_groups {
                 ui.separator();
             }
         }
         if any_clicked && context_menu {
             ui.close_kind(egui::UiKind::Menu);
         }
+        Ok(refresh)
+    }
+
+    /// Renders all operations in a specific group.
+    /// This is useful for building custom caller layouts, submenus, and advanced structural separations.
+    pub fn show_group<F>(
+        &mut self,
+        ui: &mut egui::Ui,
+        provider: &dyn TableProvider,
+        data: &mut TableState,
+        group_idx: usize,
+        context_menu: bool,
+        mut button_renderer: F,
+    ) -> Result<bool, TableError>
+    where
+        F: FnMut(
+            &mut egui::Ui,
+            &mut Box<dyn TableOperation>,
+            bool, // enabled
+            &str, // localized disabled reason
+        ) -> egui::Response,
+    {
+        if group_idx >= self.groups.len() {
+            return Ok(false);
+        }
+
+        let refresh = self.update(ui.ctx());
+        let mut any_clicked = false;
+
+        let op_group = &mut self.groups[group_idx];
+        for op in op_group {
+            let is_pending = op.is_pending();
+
+            if op.pollable() {
+                op.poll(ui, data)?;
+            }
+            let (enabled, reason) = if is_pending {
+                (false, t!("operation-pending"))
+            } else {
+                op.evaluate_enablement(data)
+            };
+
+            if !context_menu {
+                op.extra_ui(ui, data)?;
+            }
+
+            let response = button_renderer(ui, op, enabled, reason.as_ref());
+            if response.clicked() {
+                any_clicked = true;
+                let mut ctx = OperationContext { ui, data, provider };
+                op.exec(&mut ctx)?;
+            }
+        }
+
+        if any_clicked && context_menu {
+            ui.close_kind(egui::UiKind::Menu);
+        }
+
+        Ok(refresh)
+    }
+
+    /// Renders a single operation directly at a specific group and operation index.
+    /// Gives the caller total control over fine-grained placement and visual arrangement.
+    pub fn show_operation<F>(
+        &mut self,
+        ui: &mut egui::Ui,
+        provider: &dyn TableProvider,
+        data: &mut TableState,
+        group_idx: usize,
+        op_idx: usize,
+        context_menu: bool,
+        button_renderer: F,
+    ) -> Result<bool, TableError>
+    where
+        F: FnOnce(
+            &mut egui::Ui,
+            &mut Box<dyn TableOperation>,
+            bool, // enabled
+            &str, // localized disabled reason
+        ) -> egui::Response,
+    {
+        if group_idx >= self.groups.len() || op_idx >= self.groups[group_idx].len() {
+            return Ok(false);
+        }
+
+        let refresh = self.update(ui.ctx());
+
+        let op = &mut self.groups[group_idx][op_idx];
+        let is_pending = op.is_pending();
+
+        if op.pollable() {
+            op.poll(ui, data)?;
+        }
+        let (enabled, reason) = if is_pending {
+            (false, t!("operation-pending"))
+        } else {
+            op.evaluate_enablement(data)
+        };
+
+        if !context_menu {
+            op.extra_ui(ui, data)?;
+        }
+
+        let response = button_renderer(ui, op, enabled, reason.as_ref());
+        if response.clicked() {
+            let mut ctx = OperationContext { ui, data, provider };
+            op.exec(&mut ctx)?;
+            if context_menu {
+                ui.close_kind(egui::UiKind::Menu);
+            }
+        }
+
         Ok(refresh)
     }
 }
