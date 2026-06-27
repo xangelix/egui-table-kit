@@ -20,8 +20,8 @@ keywords = ["egui", "table", "tree", "filter", "sort"]
 ahash = "0.8"
 bitflags = { version = "2", features = ["serde"] }
 compact_str = "0.9"
-egui = "0.34"
-egui_extras = { version = "0.34", default-features = false }
+egui = "0.35"
+egui_extras = { version = "0.35", default-features = false }
 fluent-zero = "0.1"
 parking_lot = { version = "0.12", features = ["hardware-lock-elision"] }
 regex = "1.12"
@@ -33,4 +33,4 @@ thiserror = "2"
 fluent-zero-build = "0.1"
 
 [dev-dependencies]
-eframe = "0.34"
+eframe = "0.35"

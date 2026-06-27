@@ -150,7 +150,7 @@ impl Default for TableApp {
 
 impl eframe::App for TableApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.heading(egui::RichText::new("egui-table-kit Explorer").strong());
             ui.add_space(10.0);
 
