@@ -37,7 +37,8 @@ Implement the `TableProvider` trait to adapt your dataset for the table view. Th
 
 ```rust
 pub trait TableProvider {
-    fn headers(&self) -> &[&str];
+    fn column_count(&self) -> usize;
+    fn header(&self, index: usize) -> Option<std::borrow::Cow<'_, str>>;
     fn row_count(&self) -> usize;
 
     /// Stream selected rows sequentially to a captured closure.
@@ -150,7 +151,7 @@ use eframe::egui;
 use egui_table_kit::{
     error::TableError,
     header::HeaderTrait,
-    operations::{CopyRows, DeSelectAll, RowCallback, SelectAll, TableOperations, TableProvider},
+    operations::{CopyRows, DeSelectAll, HeaderIter, RowCallback, SelectAll, TableOperations, TableProvider},
     state::TableState,
 };
 
@@ -160,7 +161,11 @@ struct SimpleDataset {
 }
 
 impl TableProvider for SimpleDataset {
-    fn headers(&self) -> &[&str] { &self.headers }
+    fn column_count(&self) -> usize { self.headers.len() }
+    fn header(&self, index: usize) -> Option<Cow<'_, str>> {
+        self.headers.get(index).map(|&s| Cow::Borrowed(s))
+    }
+    fn headers(&self) -> HeaderIter<'_> { HeaderIter::new(self) }
     fn row_count(&self) -> usize { self.records.len() }
 
     fn for_all_rows(&self, f: &mut RowCallback<'_>) -> Result<(), TableError> {
@@ -242,7 +247,7 @@ impl eframe::App for DemoApp {
             // Build table header with built-in filter and sort support
             if let Ok((responses, table)) = builder.archived_headers(
                 &self.state,
-                self.provider.headers().iter().copied(),
+                self.provider.headers(),
                 22.0, // Header height
                 &[],  // Highlight palette Row 1
                 &[],  // Highlight palette Row 2
@@ -269,7 +274,7 @@ impl eframe::App for DemoApp {
                     for &row_idx in &active_rows {
                         let is_selected = self.state.selected_rows.contains(row_idx as u32);
                         body.row(18.0, |mut row| {
-                            for col_idx in 0..self.provider.headers().len() {
+                            for col_idx in 0..self.provider.column_count() {
                                 row.col(|ui| {
                                     let rect = ui.max_rect().expand2(0.5 * ui.spacing().item_spacing);
                                     let response = ui.interact(rect, ui.id().with((row_idx, col_idx)), egui::Sense::click());

@@ -6,7 +6,7 @@ use egui_table_kit::{
     filter::highlight::select_color,
     header::HeaderTrait,
     operations::{
-        CopyRows, DeSelectAll, OperationContext, RowCallback, SelectAll, TableOperation,
+        CopyRows, DeSelectAll, HeaderIter, OperationContext, RowCallback, SelectAll, TableOperation,
         TableOperationEnablement, TableOperations, TableProvider,
     },
     state::TableState,
@@ -62,8 +62,16 @@ struct ContactDataset {
 }
 
 impl TableProvider for ContactDataset {
-    fn headers(&self) -> &[&str] {
-        &self.headers
+    fn column_count(&self) -> usize {
+        self.headers.len()
+    }
+
+    fn header(&self, index: usize) -> Option<Cow<'_, str>> {
+        self.headers.get(index).map(|&s| Cow::Borrowed(s))
+    }
+
+    fn headers(&self) -> HeaderIter<'_> {
+        HeaderIter::new(self)
     }
 
     fn row_count(&self) -> usize {
@@ -184,7 +192,7 @@ impl eframe::App for TableApp {
 
             if let Ok((responses, table)) = builder.archived_headers(
                 &self.state,
-                self.provider.headers().iter().copied(),
+                self.provider.headers(),
                 18.0, // Reduced header vertical height
                 &org_colors,
                 &user_colors,
@@ -220,7 +228,7 @@ impl eframe::App for TableApp {
                         };
 
                         body.row(row_height, |mut row| {
-                            for col_idx in 0..self.provider.headers().len() {
+                            for col_idx in 0..self.provider.column_count() {
                                 row.col(|ui| {
                                     let item_spacing = ui.spacing().item_spacing;
                                     let gapless_rect = ui.max_rect().expand2(0.5 * item_spacing);

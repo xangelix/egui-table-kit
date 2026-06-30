@@ -212,10 +212,10 @@ fn draw_vertical_ellipsis(ui: &mut egui::Ui) -> egui::Response {
 }
 
 pub trait HeaderTrait<'a> {
-    fn archived_headers(
+    fn archived_headers<S: AsRef<str>>(
         self,
         data: &TableState,
-        headers: impl IntoIterator<Item = &'a str>,
+        headers: impl IntoIterator<Item = S>,
         height: f32,
         org_colors: &[[u8; 3]],
         user_colors: &[[u8; 3]],
@@ -223,10 +223,10 @@ pub trait HeaderTrait<'a> {
 }
 
 impl<'a> HeaderTrait<'a> for TableBuilder<'a> {
-    fn archived_headers(
+    fn archived_headers<S: AsRef<str>>(
         self,
         data: &TableState,
-        headers: impl IntoIterator<Item = &'a str>,
+        headers: impl IntoIterator<Item = S>,
         height: f32,
         org_colors: &[[u8; 3]],
         user_colors: &[[u8; 3]],
@@ -248,7 +248,7 @@ impl<'a> HeaderTrait<'a> for TableBuilder<'a> {
                     });
 
                 if let Ok(message) =
-                    header.header_cell(title, &sort_up, previous_response, org_colors, user_colors)
+                    header.header_cell(title.as_ref(), &sort_up, previous_response, org_colors, user_colors)
                 {
                     messages.push(message);
                 } else {

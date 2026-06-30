@@ -24,8 +24,53 @@ pub struct RowHierarchy {
     pub is_expanded: bool,
 }
 
+pub struct HeaderIter<'a> {
+    provider: &'a dyn TableProvider,
+    index: usize,
+    count: usize,
+}
+
+impl<'a> HeaderIter<'a> {
+    pub fn new(provider: &'a dyn TableProvider) -> Self {
+        Self {
+            provider,
+            index: 0,
+            count: provider.column_count(),
+        }
+    }
+}
+
+impl<'a> Iterator for HeaderIter<'a> {
+    type Item = Cow<'a, str>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.count {
+            let res = self.provider.header(self.index);
+            self.index += 1;
+            res
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.count.saturating_sub(self.index);
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'a> ExactSizeIterator for HeaderIter<'a> {
+    fn len(&self) -> usize {
+        self.count.saturating_sub(self.index)
+    }
+}
+
 pub trait TableProvider {
-    fn headers(&self) -> &[&str];
+    fn column_count(&self) -> usize;
+    fn header(&self, index: usize) -> Option<Cow<'_, str>>;
+
+    fn headers(&self) -> HeaderIter<'_>;
+
     fn row_count(&self) -> usize;
 
     fn for_selected_rows(
@@ -773,17 +818,15 @@ impl TableOperation for CopyHeadersRows {
     }
 
     fn exec(&mut self, ctx: &mut OperationContext<'_, '_>) -> Result<(), TableError> {
-        let headers = ctx.provider.headers();
-
         // Pre-allocate a reasonable capacity for headers and initial rows
         let mut output = String::with_capacity(2048);
 
         // 1. Write the headers directly into the buffer (replacing headers.join(","))
-        for (i, header) in headers.iter().enumerate() {
+        for (i, header) in ctx.provider.headers().enumerate() {
             if i > 0 {
                 output.push(',');
             }
-            output.push_str(header);
+            output.push_str(&header);
         }
 
         // 2. Stream the selected rows sequentially into the same buffer
