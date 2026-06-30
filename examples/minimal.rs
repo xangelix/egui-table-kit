@@ -65,7 +65,7 @@ struct ContactRow<'a> {
     record: &'a [String],
 }
 
-impl<'a> Row for ContactRow<'a> {
+impl Row for ContactRow<'_> {
     fn cell(&self, col_index: usize) -> Option<TableCell<'_>> {
         self.record
             .get(col_index)

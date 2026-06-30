@@ -14,7 +14,7 @@ pub trait Row {
     fn column_count(&self) -> usize;
 }
 
-impl<'a> Row for [TableCell<'a>] {
+impl Row for [TableCell<'_>] {
     fn cell(&self, col_index: usize) -> Option<TableCell<'_>> {
         self.get(col_index).map(|(val, hover)| {
             (
@@ -74,7 +74,7 @@ impl<'a> Iterator for HeaderIter<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for HeaderIter<'a> {
+impl ExactSizeIterator for HeaderIter<'_> {
     fn len(&self) -> usize {
         self.count.saturating_sub(self.index)
     }
@@ -797,7 +797,7 @@ impl TableOperation for CopyRows {
                 }
                 if let Some((val, hover)) = row.cell(i) {
                     let cell_text = if self.prioritize_hovers {
-                        hover.as_ref().map_or(val.as_ref(), |h| h.as_ref())
+                        hover.as_ref().map_or_else(|| val.as_ref(), |h| h.as_ref())
                     } else {
                         val.as_ref()
                     };
@@ -857,7 +857,7 @@ impl TableOperation for CopyHeadersRows {
                 }
                 if let Some((val, hover)) = row.cell(i) {
                     let cell_text = if self.prioritize_hovers {
-                        hover.as_ref().map_or(val.as_ref(), |h| h.as_ref())
+                        hover.as_ref().map_or_else(|| val.as_ref(), |h| h.as_ref())
                     } else {
                         val.as_ref()
                     };
