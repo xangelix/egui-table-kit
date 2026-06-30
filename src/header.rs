@@ -247,9 +247,13 @@ impl<'a> HeaderTrait<'a> for TableBuilder<'a> {
                         (&col.response, col.sort_up)
                     });
 
-                if let Ok(message) =
-                    header.header_cell(title.as_ref(), &sort_up, previous_response, org_colors, user_colors)
-                {
+                if let Ok(message) = header.header_cell(
+                    title.as_ref(),
+                    &sort_up,
+                    previous_response,
+                    org_colors,
+                    user_colors,
+                ) {
                     messages.push(message);
                 } else {
                     halt_error = Some(TableError::CorruptedState);

@@ -6,8 +6,8 @@ use egui_table_kit::{
     filter::highlight::select_color,
     header::HeaderTrait,
     operations::{
-        CopyRows, DeSelectAll, HeaderIter, OperationContext, RowCallback, SelectAll, TableOperation,
-        TableOperationEnablement, TableOperations, TableProvider,
+        CopyRows, DeSelectAll, HeaderIter, OperationContext, Row, RowCallback, SelectAll,
+        TableCell, TableOperation, TableOperationEnablement, TableOperations, TableProvider,
     },
     state::TableState,
 };
@@ -61,6 +61,22 @@ struct ContactDataset {
     records: Vec<Vec<String>>,
 }
 
+struct ContactRow<'a> {
+    record: &'a [String],
+}
+
+impl<'a> Row for ContactRow<'a> {
+    fn cell(&self, col_index: usize) -> Option<TableCell<'_>> {
+        self.record
+            .get(col_index)
+            .map(|s| (Cow::Borrowed(s.as_str()), None))
+    }
+
+    fn column_count(&self) -> usize {
+        self.record.len()
+    }
+}
+
 impl TableProvider for ContactDataset {
     fn column_count(&self) -> usize {
         self.headers.len()
@@ -80,11 +96,7 @@ impl TableProvider for ContactDataset {
 
     fn for_all_rows(&self, f: &mut RowCallback<'_>) -> Result<(), TableError> {
         for record in &self.records {
-            let cells: Vec<(Cow<'_, str>, Option<Cow<'_, str>>)> = record
-                .iter()
-                .map(|val| (Cow::Borrowed(val.as_str()), None))
-                .collect();
-            f(&cells)?;
+            f(&ContactRow { record })?;
         }
         Ok(())
     }
@@ -96,11 +108,7 @@ impl TableProvider for ContactDataset {
     ) -> Result<(), TableError> {
         for idx in &state.selected_rows {
             if let Some(record) = self.records.get(idx as usize) {
-                let cells: Vec<(Cow<'_, str>, Option<Cow<'_, str>>)> = record
-                    .iter()
-                    .map(|val| (Cow::Borrowed(val.as_str()), None))
-                    .collect();
-                f(&cells)?;
+                f(&ContactRow { record })?;
             }
         }
         Ok(())

@@ -205,7 +205,7 @@ impl TableState {
         provider.for_all_rows(&mut |row| {
             if row_idx < active_mask.len() && active_mask[row_idx] {
                 let highlight = self.highlights.get_usize(row_idx);
-                if let Some(cell) = row.get(filter_col)
+                if let Some(cell) = row.cell(filter_col)
                     && filter.matches(&cell.0, highlight)
                 {
                     new_active.push(row_idx);

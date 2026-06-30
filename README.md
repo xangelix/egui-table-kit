@@ -151,13 +151,24 @@ use eframe::egui;
 use egui_table_kit::{
     error::TableError,
     header::HeaderTrait,
-    operations::{CopyRows, DeSelectAll, HeaderIter, RowCallback, SelectAll, TableOperations, TableProvider},
+    operations::{CopyRows, DeSelectAll, HeaderIter, Row, RowCallback, SelectAll, TableCell, TableOperations, TableProvider},
     state::TableState,
 };
 
 struct SimpleDataset {
     headers: Vec<&'static str>,
     records: Vec<Vec<String>>,
+}
+
+struct SimpleRow<'a> {
+    record: &'a [String],
+}
+
+impl<'a> Row for SimpleRow<'a> {
+    fn cell(&self, col_index: usize) -> Option<TableCell<'_>> {
+        self.record.get(col_index).map(|s| (Cow::Borrowed(s.as_str()), None))
+    }
+    fn column_count(&self) -> usize { self.record.len() }
 }
 
 impl TableProvider for SimpleDataset {
@@ -170,11 +181,7 @@ impl TableProvider for SimpleDataset {
 
     fn for_all_rows(&self, f: &mut RowCallback<'_>) -> Result<(), TableError> {
         for record in &self.records {
-            let cells: Vec<(Cow<'_, str>, Option<Cow<'_, str>>)> = record
-                .iter()
-                .map(|val| (Cow::Borrowed(val.as_str()), None))
-                .collect();
-            f(&cells)?;
+            f(&SimpleRow { record })?;
         }
         Ok(())
     }
@@ -186,11 +193,7 @@ impl TableProvider for SimpleDataset {
     ) -> Result<(), TableError> {
         for idx in &state.selected_rows {
             if let Some(record) = self.records.get(idx as usize) {
-                let cells: Vec<(Cow<'_, str>, Option<Cow<'_, str>>)> = record
-                    .iter()
-                    .map(|val| (Cow::Borrowed(val.as_str()), None))
-                    .collect();
-                f(&cells)?;
+                f(&SimpleRow { record })?;
             }
         }
         Ok(())
@@ -310,7 +313,7 @@ When configuring hierarchical tree tables, `TableState::show_tree_cell` draws gu
 
 ### 2. Double-text fallback with `RowSliceExt`
 
-`RowSlice<'a, 'b>` holds references to `TableCell<'a>` containing `(Cow<'a, str>, Option<Cow<'a, str>>)`. The first string represents the primary display value, while the second serves as an alternate or hover string. The `RowSliceExt` trait enables parsing either source value:
+`dyn Row + '_` yields `TableCell<'_>` containing `(Cow<'_, str>, Option<Cow<'_, str>>)`. The first string represents the primary display value, while the second serves as an alternate or hover string. The `RowSliceExt` trait enables parsing either source value:
 
 - `get_primary(col)` / `get_hover(col)`: Retrieve raw string values.
 - `parse_primary::<T>(col)` / `parse_hover::<T>(col)`: Attempt to parse cellular strings into specific typed values (e.g. `f32`, `DateTime`, etc.) with generic error propagation.

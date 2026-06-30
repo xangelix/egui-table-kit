@@ -8,14 +8,29 @@ use super::{error::TableError, filter::Filter, state::TableState};
 /// A single cell representation containing a primary value and an optional hover/display override.
 pub type TableCell<'a> = (Cow<'a, str>, Option<Cow<'a, str>>);
 
-/// A row slice reference passed sequentially to callbacks during iteration.
-pub type RowSlice<'a, 'b> = &'b [TableCell<'a>];
+/// A trait representing a single row in the table, permitting dynamic cell evaluation.
+pub trait Row {
+    fn cell(&self, col_index: usize) -> Option<TableCell<'_>>;
+    fn column_count(&self) -> usize;
+}
+
+impl<'a> Row for [TableCell<'a>] {
+    fn cell(&self, col_index: usize) -> Option<TableCell<'_>> {
+        self.get(col_index).map(|(val, hover)| {
+            (
+                Cow::Borrowed(val.as_ref()),
+                hover.as_ref().map(|h| Cow::Borrowed(h.as_ref())),
+            )
+        })
+    }
+    fn column_count(&self) -> usize {
+        self.len()
+    }
+}
 
 /// The callback signature used to process streamed row data.
 /// - `'b` represents the lifetime of any local variables captured by the closure.
-/// - `for<'a, 'c>` unifies the string content lifetime `'a` and reference lifetime `'c`,
-///   allowing the callback to process rows with short-lived, local lifetimes.
-pub type RowCallback<'b> = dyn for<'a, 'c> FnMut(RowSlice<'a, 'c>) -> Result<(), TableError> + 'b;
+pub type RowCallback<'b> = dyn FnMut(&dyn Row) -> Result<(), TableError> + 'b;
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RowHierarchy {
@@ -93,7 +108,7 @@ pub trait TableProvider {
         let mut values = Vec::with_capacity(self.row_count());
         self.for_all_rows(&mut |row| {
             let val = row
-                .get(col_index)
+                .cell(col_index)
                 .map(|(v, _)| v.to_compact_string())
                 .unwrap_or_default();
             values.push(val);
@@ -132,7 +147,7 @@ pub trait TableProvider {
             let mut matches = true;
 
             for &(col_idx, ref filter) in filters {
-                if let Some(cell) = row.get(col_idx) {
+                if let Some(cell) = row.cell(col_idx) {
                     if !filter.matches(&cell.0, highlight) {
                         matches = false;
                         break;
@@ -195,7 +210,7 @@ impl dyn TableProvider + '_ {
         mut f: F,
     ) -> Result<Vec<T>, TableError>
     where
-        F: FnMut(RowSlice<'_, '_>) -> Result<T, TableError>,
+        F: FnMut(&dyn Row) -> Result<T, TableError>,
     {
         let mut results = Vec::with_capacity(state.selected_rows.len() as usize);
         self.for_selected_rows(state, &mut |row| {
@@ -212,7 +227,7 @@ impl dyn TableProvider + '_ {
         f: F,
     ) -> Result<Option<T>, TableError>
     where
-        F: FnOnce(RowSlice<'_, '_>) -> Result<T, TableError>,
+        F: FnOnce(&dyn Row) -> Result<T, TableError>,
     {
         let mut result = None;
         let mut f_opt = Some(f);
@@ -230,10 +245,10 @@ impl dyn TableProvider + '_ {
 
 pub trait RowSliceExt {
     /// Extracts the primary text at the specified column index.
-    fn get_primary(&self, col_index: usize) -> Result<&str, TableError>;
+    fn get_primary(&self, col_index: usize) -> Result<Cow<'_, str>, TableError>;
 
     /// Extracts the hover/alternate text at the specified column index.
-    fn get_hover(&self, col_index: usize) -> Result<&str, TableError>;
+    fn get_hover(&self, col_index: usize) -> Result<Cow<'_, str>, TableError>;
 
     /// Parses the primary text at the specified column index into type `T`.
     fn parse_primary<T>(&self, col_index: usize) -> Result<T, TableError>
@@ -248,16 +263,16 @@ pub trait RowSliceExt {
         <T as std::str::FromStr>::Err: std::fmt::Display;
 }
 
-impl RowSliceExt for RowSlice<'_, '_> {
-    fn get_primary(&self, col_index: usize) -> Result<&str, TableError> {
-        self.get(col_index)
-            .map(|(val, _)| val.as_ref())
+impl RowSliceExt for dyn Row + '_ {
+    fn get_primary(&self, col_index: usize) -> Result<Cow<'_, str>, TableError> {
+        self.cell(col_index)
+            .map(|(val, _)| val)
             .ok_or(TableError::CorruptedState)
     }
 
-    fn get_hover(&self, col_index: usize) -> Result<&str, TableError> {
-        self.get(col_index)
-            .and_then(|(_, hover)| hover.as_ref().map(AsRef::as_ref))
+    fn get_hover(&self, col_index: usize) -> Result<Cow<'_, str>, TableError> {
+        self.cell(col_index)
+            .and_then(|(_, hover)| hover)
             .ok_or(TableError::CorruptedState)
     }
 
@@ -266,7 +281,8 @@ impl RowSliceExt for RowSlice<'_, '_> {
         T: std::str::FromStr,
         <T as std::str::FromStr>::Err: std::fmt::Display,
     {
-        T::from_str(self.get_primary(col_index)?).map_err(|e| TableError::Generic(e.to_string()))
+        T::from_str(self.get_primary(col_index)?.as_ref())
+            .map_err(|e| TableError::Generic(e.to_string()))
     }
 
     fn parse_hover<T>(&self, col_index: usize) -> Result<T, TableError>
@@ -274,7 +290,8 @@ impl RowSliceExt for RowSlice<'_, '_> {
         T: std::str::FromStr,
         <T as std::str::FromStr>::Err: std::fmt::Display,
     {
-        T::from_str(self.get_hover(col_index)?).map_err(|e| TableError::Generic(e.to_string()))
+        T::from_str(self.get_hover(col_index)?.as_ref())
+            .map_err(|e| TableError::Generic(e.to_string()))
     }
 }
 
@@ -774,16 +791,18 @@ impl TableOperation for CopyRows {
             if !output.is_empty() {
                 output.push('\n');
             }
-            for (i, (val, hover)) in row.iter().enumerate() {
+            for i in 0..row.column_count() {
                 if i > 0 {
                     output.push(',');
                 }
-                let cell_text = if self.prioritize_hovers {
-                    hover.as_deref().unwrap_or(val)
-                } else {
-                    val
-                };
-                output.push_str(cell_text);
+                if let Some((val, hover)) = row.cell(i) {
+                    let cell_text = if self.prioritize_hovers {
+                        hover.as_ref().map_or(val.as_ref(), |h| h.as_ref())
+                    } else {
+                        val.as_ref()
+                    };
+                    output.push_str(cell_text);
+                }
             }
             Ok(())
         })?;
@@ -832,16 +851,18 @@ impl TableOperation for CopyHeadersRows {
         // 2. Stream the selected rows sequentially into the same buffer
         ctx.provider.for_selected_rows(ctx.data, &mut |row| {
             output.push('\n');
-            for (i, (val, hover)) in row.iter().enumerate() {
+            for i in 0..row.column_count() {
                 if i > 0 {
                     output.push(',');
                 }
-                let cell_text = if self.prioritize_hovers {
-                    hover.as_deref().unwrap_or(val)
-                } else {
-                    val
-                };
-                output.push_str(cell_text);
+                if let Some((val, hover)) = row.cell(i) {
+                    let cell_text = if self.prioritize_hovers {
+                        hover.as_ref().map_or(val.as_ref(), |h| h.as_ref())
+                    } else {
+                        val.as_ref()
+                    };
+                    output.push_str(cell_text);
+                }
             }
             Ok(())
         })?;
