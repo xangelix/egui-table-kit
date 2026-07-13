@@ -19,7 +19,7 @@ keywords = ["egui", "table", "tree", "filter", "sort"]
 [dependencies]
 ahash = "0.8"
 bitflags = { version = "2", features = ["serde"] }
-compact_str = "0.9"
+compact_str = "0.10"
 egui = { version = "0.35", features = ["serde"] }
 fluent-zero = "0.1"
 parking_lot = { version = "0.12", features = ["hardware-lock-elision"] }
