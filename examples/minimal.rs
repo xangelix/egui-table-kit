@@ -4,9 +4,9 @@ use eframe::egui;
 use egui_table_kit::{
     error::TableError,
     filter::highlight::select_color,
-    header::HeaderTrait,
+    header::HeaderMenuAnchor,
     operations::{
-        CopyRows, DeSelectAll, HeaderIter, OperationContext, Row, RowCallback, SelectAll,
+        CopyRows, DeSelectAll, HeaderIter, OperationContext, OwnedRow, Row, RowCallback, SelectAll,
         TableCell, TableOperation, TableOperationEnablement, TableOperations, TableProvider,
     },
     state::TableState,
@@ -92,6 +92,28 @@ impl TableProvider for ContactDataset {
 
     fn row_count(&self) -> usize {
         self.records.len()
+    }
+
+    fn cell_at(
+        &self,
+        row_index: usize,
+        col_index: usize,
+    ) -> Result<Option<TableCell<'_>>, TableError> {
+        Ok(self
+            .records
+            .get(row_index)
+            .and_then(|row| row.get(col_index))
+            .map(|s| (Cow::Borrowed(s.as_str()), None)))
+    }
+
+    /// Keeps backward-compatibility wrapper intact for export operations (e.g. clipboard copy)
+    fn row_at(&self, index: usize) -> Result<Option<OwnedRow>, TableError> {
+        Ok(self.records.get(index).map(|record| OwnedRow {
+            cells: record
+                .iter()
+                .map(|s| (compact_str::CompactString::from(s.as_str()), None))
+                .collect(),
+        }))
     }
 
     fn for_all_rows(&self, f: &mut RowCallback<'_>) -> Result<(), TableError> {
@@ -187,122 +209,132 @@ impl eframe::App for TableApp {
             let org_colors = [[219, 58, 58], [58, 219, 112]];
             let user_colors = [];
 
-            let row_height = 18.0; // Reduced row vertical spacing
+            // Refresh the filtered/sorted view only when something changed; this is a
+            // cheap no-op on idle frames instead of a full O(N) filter + sort pass.
+            let _ = self.state.refresh_view(&self.provider);
 
-            let builder = egui_extras::TableBuilder::new(ui)
+            // Expose table settings with modern, virtualized columns
+            let columns = (0..self.provider.column_count())
+                .map(|col_idx| {
+                    let is_last = col_idx == self.provider.column_count() - 1;
+                    let initial_width = if is_last { 150.0 } else { 120.0 };
+                    egui_table_kit::layout::Column::new(initial_width)
+                        .range(15.0..=f32::INFINITY)
+                        .resizable(true)
+                })
+                .collect::<Vec<_>>();
+
+            let row_height = 28.0;
+            let table = egui_table_kit::layout::Table::new()
                 .id_salt("stable_explorer_table")
-                .sense(egui::Sense::click())
-                .striped(true)
-                .resizable(true)
-                .column(egui_extras::Column::initial(140.0))
-                .column(egui_extras::Column::initial(110.0))
-                .column(egui_extras::Column::remainder());
+                .num_rows(self.state.active_rows.len() as u64)
+                .columns(columns)
+                .headers([egui_table_kit::layout::HeaderRow::new(row_height)]);
 
-            if let Ok((responses, table)) = builder.archived_headers(
-                &self.state,
-                self.provider.headers(),
-                18.0, // Reduced header vertical height
+            let active_rows_count = self.state.active_rows.len();
+
+            let Self {
+                provider, state, ..
+            } = self;
+
+            let mut collected_responses = Vec::new();
+            let mut halt_error = None;
+            let mut item_clicked = None;
+            let mut secondary_clicked = None;
+
+            // Clone lightweight structures to completely separate mutable borrow Lifetimes
+            let highlights = state.highlights.clone();
+            let active_rows = state.active_rows.clone();
+
+            let custom_cell_ui = Box::new(
+                move |ui: &mut egui::Ui,
+                      cell_info: &egui_table_kit::layout::CellInfo,
+                      row_data: &dyn Row,
+                      text_color: egui::Color32| {
+                    let row_idx = active_rows[cell_info.row_nr as usize];
+
+                    let tag_color = if let Some(color_idx) = highlights.get_usize(row_idx)
+                        && let Ok(rgb) = select_color(color_idx, &org_colors, &user_colors)
+                    {
+                        Some(egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]))
+                    } else {
+                        None
+                    };
+
+                    let response = ui
+                        .horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+
+                            if cell_info.col_nr == 0
+                                && let Some(color) = tag_color
+                            {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(8.0, 8.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(rect, 1.5, color);
+                            }
+
+                            if let Some((cell_val, _)) = row_data.cell(cell_info.col_nr) {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(cell_val.as_ref()).color(text_color),
+                                    )
+                                    .selectable(false)
+                                    .wrap_mode(
+                                        if ui.is_sizing_pass() {
+                                            ui.wrap_mode()
+                                        } else {
+                                            egui::TextWrapMode::Truncate
+                                        },
+                                    ),
+                                );
+                            }
+                        })
+                        .response;
+
+                    Some(response)
+                },
+            );
+
+            let mut delegate = egui_table_kit::delegate::TableKitDelegate::new(
+                provider,
+                state,
                 &org_colors,
                 &user_colors,
-            ) {
-                let _ = self.state.process_responses(&self.provider, responses);
+                &mut collected_responses,
+                &mut halt_error,
+                Some(custom_cell_ui),
+                &mut item_clicked,
+                &mut secondary_clicked,
+            );
 
-                // Explicitly run column filters
-                let filter_state = self.state.get_filter_state();
-                let _ = self.state.apply_all_filters(&self.provider, &filter_state);
+            // Configure menu popup anchoring: can be HeaderMenuAnchor::Cursor or HeaderMenuAnchor::Cell
+            delegate.header_menu_anchor = HeaderMenuAnchor::Cursor;
 
-                // Explicitly run active sorting configuration
-                if let Some((sort_col, sort_up)) = self.state.get_sort_state() {
-                    let _ = self.provider.sort_active_rows(
-                        &mut self.state.active_rows,
-                        sort_col,
-                        sort_up,
-                    );
-                }
+            // Make the separator lines brighter by temporarily overriding noninteractive stroke color
+            let bright_gray = egui::Color32::from_rgb(180, 180, 180);
+            ui.visuals_mut().widgets.noninteractive.bg_stroke.color = bright_gray;
 
-                let active_rows = self.state.active_rows.clone();
+            // Ensure the delegate's row height configuration is set as desired
+            delegate.row_height = row_height;
 
-                table.body(|mut body| {
-                    for &row_idx in &active_rows {
-                        let is_selected = self.state.selected_rows.contains(row_idx as u32);
+            #[allow(clippy::cast_precision_loss)]
+            let total_height = (active_rows_count + 1) as f32 * delegate.row_height;
+            let table_height = total_height.min(ui.available_height());
 
-                        let tag_color = if let Some(color_idx) =
-                            self.state.highlights.get_usize(row_idx)
-                            && let Ok(rgb) = select_color(color_idx, &org_colors, &user_colors)
-                        {
-                            Some(egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]))
-                        } else {
-                            None
-                        };
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), table_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    table.show(ui, &mut delegate);
+                },
+            );
 
-                        body.row(row_height, |mut row| {
-                            for col_idx in 0..self.provider.column_count() {
-                                row.col(|ui| {
-                                    let item_spacing = ui.spacing().item_spacing;
-                                    let gapless_rect = ui.max_rect().expand2(0.5 * item_spacing);
+            // Explicitly release the borrows held by the delegate
+            drop(delegate);
 
-                                    let is_row_hovered =
-                                        ui.ctx().pointer_latest_pos().is_some_and(|pos| {
-                                            gapless_rect.y_range().contains(pos.y)
-                                                && ui.clip_rect().x_range().contains(pos.x)
-                                        });
-
-                                    let response = ui.interact(
-                                        gapless_rect,
-                                        ui.id().with((row_idx, col_idx)),
-                                        egui::Sense::click(),
-                                    );
-
-                                    if response.clicked() {
-                                        self.state.handle_row_selection(
-                                            ui.input(|i| i.modifiers),
-                                            row_idx,
-                                        );
-                                    }
-
-                                    let bg_color = if is_selected {
-                                        Some(ui.visuals().selection.bg_fill)
-                                    } else if is_row_hovered {
-                                        Some(ui.visuals().widgets.hovered.weak_bg_fill)
-                                    } else {
-                                        None
-                                    };
-
-                                    if let Some(bg) = bg_color {
-                                        ui.painter().rect_filled(
-                                            gapless_rect,
-                                            egui::CornerRadius::ZERO,
-                                            bg,
-                                        );
-                                    }
-
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 4.0;
-
-                                        if col_idx == 0
-                                            && let Some(color) = tag_color
-                                        {
-                                            let (rect, _) = ui.allocate_exact_size(
-                                                egui::vec2(8.0, 8.0),
-                                                egui::Sense::hover(),
-                                            );
-                                            ui.painter().rect_filled(rect, 1.5, color);
-                                        }
-
-                                        let cell_val = &self.provider.records[row_idx][col_idx];
-                                        let text_color = if is_selected {
-                                            ui.visuals().selection.stroke.color
-                                        } else {
-                                            ui.visuals().widgets.inactive.text_color()
-                                        };
-                                        ui.colored_label(text_color, cell_val);
-                                    });
-                                });
-                            }
-                        });
-                    }
-                });
-            }
+            let _ = state.process_responses(provider, collected_responses);
         });
     }
 }

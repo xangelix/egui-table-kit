@@ -1,3 +1,5 @@
+//! Color highlight options and layout configuration widgets.
+
 use std::sync::{Arc, LazyLock};
 
 use fluent_zero::t;
@@ -5,9 +7,11 @@ use parking_lot::RwLock;
 
 use crate::error::TableError;
 
+/// Thread-safe global selection color index state.
 pub static SELECT_COLOR: LazyLock<Arc<RwLock<u8>>> =
     LazyLock::new(|| Arc::new(RwLock::new(Default::default())));
 
+/// Resolves a color option by its index against organizational and user-defined palettes.
 pub fn select_color_meta(
     index: u8,
     org: &[[u8; 3]],
@@ -24,10 +28,12 @@ pub fn select_color_meta(
     Ok((index, org_color_len, color.unwrap_or_else(Default::default)))
 }
 
+/// Resolves a raw RGB array for the color at the specified index.
 pub fn select_color(index: u8, org: &[[u8; 3]], user: &[[u8; 3]]) -> Result<[u8; 3], TableError> {
     select_color_meta(index, org, user).map(|(_, _, color)| color)
 }
 
+/// Renders a color selection button within the highlight filter popups.
 pub fn color_select_button(
     ui: &mut egui::Ui,
     color: egui::Color32,
@@ -62,6 +68,7 @@ pub fn color_select_button(
     response
 }
 
+/// Renders an optional color select button allowing highlight toggles.
 pub fn opt_color_select_button(
     ui: &mut egui::Ui,
     label: &str,
@@ -91,16 +98,19 @@ pub fn opt_color_select_button(
     Ok(())
 }
 
+/// Highlighting selection filter element.
 pub struct HighlightFilter<'a> {
     label: &'a str,
 }
 
 impl<'a> HighlightFilter<'a> {
+    /// Constructs a new highlight filter selector.
     #[must_use]
     pub const fn new(label: &'a str) -> Self {
         Self { label }
     }
 
+    /// Renders highlight selection controls.
     pub fn ui(
         self,
         ui: &mut egui::Ui,

@@ -291,7 +291,7 @@ impl eframe::App for DemoApp {
                                     }
 
                                     let cell_val = &self.provider.records[row_idx][col_idx];
-                                    ui.label(cell_val);
+                                    ui.add(egui::Label::new(cell_val).selectable(false));
                                 });
                             }
                         });

@@ -1,17 +1,61 @@
+//! Table management actions and toolbar operations frameworks.
+
 use std::{borrow::Cow, collections::HashSet};
 
-use compact_str::ToCompactString as _;
+use compact_str::{CompactString, ToCompactString as _};
 use fluent_zero::t;
+use roaring::RoaringBitmap;
 
 use super::{error::TableError, filter::Filter, state::TableState};
 
-/// A single cell representation containing a primary value and an optional hover/display override.
+/// Represents cell data, providing the primary text and an optional tooltip/hover override.
 pub type TableCell<'a> = (Cow<'a, str>, Option<Cow<'a, str>>);
 
-/// A trait representing a single row in the table, permitting dynamic cell evaluation.
+/// Owned counterpart of [`TableCell`] with a `'static` lifetime, used when a row's
+/// data must outlive the provider borrow (e.g. when caching visible rows for rendering).
+pub type TableCellOwned = (CompactString, Option<CompactString>);
+
+/// A fully-owned row snapshot, cacheable across frames and usable anywhere a
+/// [`Row`] is expected.
+#[derive(Default, Clone, Debug)]
+pub struct OwnedRow {
+    /// Owned cell values, indexed by column offset.
+    pub cells: Vec<TableCellOwned>,
+}
+
+impl Row for OwnedRow {
+    fn cell(&self, col_index: usize) -> Option<TableCell<'_>> {
+        self.cells.get(col_index).map(|(val, hover)| {
+            (
+                Cow::Borrowed(val.as_str()),
+                hover.as_ref().map(|h| Cow::Borrowed(h.as_str())),
+            )
+        })
+    }
+    fn column_count(&self) -> usize {
+        self.cells.len()
+    }
+}
+
+/// A row element that resolves display text properties at specific column offsets.
 pub trait Row {
     fn cell(&self, col_index: usize) -> Option<TableCell<'_>>;
     fn column_count(&self) -> usize;
+
+    /// Snapshots every column of this row into an [`OwnedRow`], detaching it from
+    /// the provider's borrow lifetime so it can be cached.
+    fn to_owned_row(&self) -> OwnedRow {
+        let mut cells = Vec::with_capacity(self.column_count());
+        for i in 0..self.column_count() {
+            if let Some((val, hover)) = self.cell(i) {
+                cells.push((
+                    val.to_compact_string(),
+                    hover.map(|h| h.to_compact_string()),
+                ));
+            }
+        }
+        OwnedRow { cells }
+    }
 }
 
 impl Row for [TableCell<'_>] {
@@ -32,6 +76,7 @@ impl Row for [TableCell<'_>] {
 /// - `'b` represents the lifetime of any local variables captured by the closure.
 pub type RowCallback<'b> = dyn FnMut(&dyn Row) -> Result<(), TableError> + 'b;
 
+/// Structural nesting parameters for tree hierarchy nodes.
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RowHierarchy {
     pub indent_level: usize,
@@ -39,6 +84,7 @@ pub struct RowHierarchy {
     pub is_expanded: bool,
 }
 
+/// Zero-allocation lazy headers iterator.
 pub struct HeaderIter<'a> {
     provider: &'a dyn TableProvider,
     index: usize,
@@ -80,6 +126,27 @@ impl ExactSizeIterator for HeaderIter<'_> {
     }
 }
 
+/// A zero-allocation row wrapper that references cell data directly from a provider.
+#[derive(Copy, Clone)]
+pub struct BorrowedRow<'a> {
+    pub provider: &'a dyn TableProvider,
+    pub row_index: usize,
+}
+
+impl Row for BorrowedRow<'_> {
+    fn cell(&self, col_index: usize) -> Option<TableCell<'_>> {
+        self.provider
+            .cell_at(self.row_index, col_index)
+            .ok()
+            .flatten()
+    }
+
+    fn column_count(&self) -> usize {
+        self.provider.column_count()
+    }
+}
+
+/// Trait implemented by datasets to back the interactive table system.
 pub trait TableProvider {
     fn column_count(&self) -> usize;
     fn header(&self, index: usize) -> Option<Cow<'_, str>>;
@@ -88,12 +155,68 @@ pub trait TableProvider {
 
     fn row_count(&self) -> usize;
 
+    /// Direct cellular random-access method.
+    ///
+    /// Override this in your custom collections to achieve O(1) performance
+    /// and completely bypass heap-allocation pathways during rendering.
+    fn cell_at(
+        &self,
+        row_index: usize,
+        col_index: usize,
+    ) -> Result<Option<TableCell<'_>>, TableError> {
+        // Fallback default: Query row_at and copy values to satisfy lifetimes
+        if let Some(owned_row) = self.row_at(row_index)?
+            && let Some((val, hover)) = owned_row.cells.get(col_index)
+        {
+            return Ok(Some((
+                Cow::Owned(val.to_string()),
+                hover.as_ref().map(|h| Cow::Owned(h.to_string())),
+            )));
+        }
+        Ok(None)
+    }
+
+    /// Processes a single row by index. Override this for O(1) random access.
+    fn for_row_at(&self, index: usize, f: &mut RowCallback<'_>) -> Result<(), TableError> {
+        let mut idx = 0;
+        self.for_all_rows(&mut |row| {
+            if idx == index {
+                f(row)?;
+            }
+            idx += 1;
+            Ok(())
+        })
+    }
+
+    /// Randomly fetches a single row as an [`OwnedRow`]. This is the access path used
+    /// by the rendering delegate for visible rows.
+    ///
+    /// The default implementation walks the dataset sequentially (O(N)) and should be
+    /// overridden for true O(1) random access whenever the backing store supports it.
+    fn row_at(&self, index: usize) -> Result<Option<OwnedRow>, TableError> {
+        if index >= self.row_count() {
+            return Ok(None);
+        }
+        let mut out: Option<OwnedRow> = None;
+        let mut idx = 0usize;
+        self.for_all_rows(&mut |row| {
+            if idx == index {
+                out = Some(row.to_owned_row());
+            }
+            idx += 1;
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// Sequentially processes each selected row with the provided callback.
     fn for_selected_rows(
         &self,
         state: &TableState,
         f: &mut RowCallback<'_>,
     ) -> Result<(), TableError>;
 
+    /// Sequentially processes every row in the dataset.
     fn for_all_rows(&self, f: &mut RowCallback<'_>) -> Result<(), TableError>;
 
     /// Sorts the active row indices by the specified column.
@@ -104,28 +227,33 @@ pub trait TableProvider {
         col_index: usize,
         ascending: bool,
     ) -> Result<(), TableError> {
-        // Collect string values for all rows at `col_index`
-        let mut values = Vec::with_capacity(self.row_count());
+        if active_rows.len() <= 1 {
+            return Ok(());
+        }
+
+        let active_set: RoaringBitmap = active_rows.iter().map(|&i| i as u32).collect();
+        let mut sort_keys = Vec::with_capacity(active_rows.len());
+
+        let mut idx = 0usize;
         self.for_all_rows(&mut |row| {
-            let val = row
-                .cell(col_index)
-                .map(|(v, _)| v.to_compact_string())
-                .unwrap_or_default();
-            values.push(val);
+            if active_set.contains(idx as u32) {
+                let val = row
+                    .cell(col_index)
+                    .map(|(v, _)| v.to_compact_string())
+                    .unwrap_or_default();
+                sort_keys.push((idx, val));
+            }
+            idx += 1;
             Ok(())
         })?;
 
-        // Sort active_rows using the collected values
-        active_rows.sort_by(|&a, &b| {
-            let val_a = values.get(a);
-            let val_b = values.get(b);
-            if ascending {
-                val_a.cmp(&val_b)
-            } else {
-                val_b.cmp(&val_a)
-            }
-        });
+        if ascending {
+            sort_keys.sort_by(|a, b| a.1.cmp(&b.1));
+        } else {
+            sort_keys.sort_by(|a, b| b.1.cmp(&a.1));
+        }
 
+        *active_rows = sort_keys.into_iter().map(|(idx, _)| idx).collect();
         Ok(())
     }
 
@@ -139,7 +267,8 @@ pub trait TableProvider {
             return Ok((0..self.row_count()).collect());
         }
 
-        let mut passing_indices = Vec::with_capacity(self.row_count());
+        let initial_capacity = self.row_count().min(2048);
+        let mut passing_indices = Vec::with_capacity(initial_capacity);
         let mut row_idx = 0;
 
         self.for_all_rows(&mut |row| {
@@ -243,6 +372,7 @@ impl dyn TableProvider + '_ {
     }
 }
 
+/// Helper trait to parse, extract, or fall back between primary text and hover text in rows.
 pub trait RowSliceExt {
     /// Extracts the primary text at the specified column index.
     fn get_primary(&self, col_index: usize) -> Result<Cow<'_, str>, TableError>;
@@ -295,16 +425,18 @@ impl RowSliceExt for dyn Row + '_ {
     }
 }
 
+/// Evaluation context supplied to active toolbar operations during executions.
 pub struct OperationContext<'a, 'b> {
     pub ui: &'a mut egui::Ui,
     pub data: &'a mut TableState,
     pub provider: &'b dyn TableProvider,
 }
 
+/// Coordinates grouped sequences of toolbar actions, polling systems, and error dialogs.
 #[derive(Debug, Default)]
 pub struct TableOperations {
     pub groups: Vec<Vec<Box<dyn TableOperation>>>,
-    pub pending_tracker: HashSet<(usize, usize)>,
+    pub pending_tracker: HashSet<(usize, usize), ahash::RandomState>,
     pub last_tick: u64,
 }
 
@@ -560,6 +692,7 @@ impl TableOperations {
     }
 }
 
+/// Triggers for when table actions can execute.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TableOperationEnablement {
     #[default]
@@ -569,6 +702,7 @@ pub enum TableOperationEnablement {
     OneSelected,
 }
 
+/// Trait defining a single modular table operation.
 pub trait TableOperation: std::any::Any + std::fmt::Debug + Send + Sync {
     fn name(&self) -> Cow<'_, str>;
     fn icon(&self) -> &'static str {
@@ -622,6 +756,7 @@ pub trait TableOperation: std::any::Any + std::fmt::Debug + Send + Sync {
     fn set_modal_open(&mut self, _open: bool) {}
     fn reset(&mut self) {}
 
+    /// Spawns an input form dialog, pausing interactions while polling.
     fn pollable_modal(
         &mut self,
         ui: &mut egui::Ui,
@@ -691,6 +826,7 @@ pub trait TableOperation: std::any::Any + std::fmt::Debug + Send + Sync {
         }
     }
 
+    /// Spawns a progress information dialog.
     fn polled_modal(
         &mut self,
         ui: &mut egui::Ui,

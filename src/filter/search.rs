@@ -1,13 +1,15 @@
+//! Search matching structures with support for Regex and case-insensitive lookups.
+
 use fluent_zero::t;
 
 bitflags::bitflags! {
-    /// Configuration flags for search behavior.
+    /// Configuration flags for search query evaluations.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SearchOptions: u8 {
-        /// If set, the search ignores case differences.
+        /// Evaluates text comparisons case-insensitively.
         const CASE_INSENSITIVE = 0b0000_0001;
-        /// If set, the search query is treated as a raw Regular Expression.
-        const REGEX =            0b0000_0010;
+        /// Compiles the search query as a regular expression.
+        const REGEX            = 0b0000_0010;
     }
 }
 
@@ -25,7 +27,7 @@ enum Matcher {
     Invalid(String),
 }
 
-/// A robust, headless-ready search engine.
+/// A comprehensive search engine supporting regex queries and case insensitivity.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Search {
     raw_query: String,
@@ -36,11 +38,13 @@ pub struct Search {
 }
 
 impl Search {
+    /// Creates a new inactive search container.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Evaluates if the provided text satisfies the current search filter.
     #[must_use]
     pub fn is_match(&self, text: &str) -> bool {
         if !self.active {
@@ -55,11 +59,13 @@ impl Search {
         }
     }
 
+    /// Updates the raw query string and regenerates the matcher state.
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.raw_query = text.into();
         self.rebuild_matcher();
     }
 
+    /// Replaces the active search options.
     pub fn set_options(&mut self, options: SearchOptions) {
         if self.options != options {
             self.options = options;
@@ -67,11 +73,13 @@ impl Search {
         }
     }
 
+    /// Toggles a specific search behavior option.
     pub fn toggle_option(&mut self, option: SearchOptions) {
         self.options.toggle(option);
         self.rebuild_matcher();
     }
 
+    /// Activates the search matching engine.
     pub fn open(&mut self) {
         if !self.active {
             self.active = true;
@@ -79,12 +87,14 @@ impl Search {
         }
     }
 
+    /// Clears the query and deactivates matching.
     pub fn clear(&mut self) {
         self.raw_query.clear();
         self.active = false;
         self.matcher = Matcher::Always;
     }
 
+    /// Permits safe mutability of the search query, rebuilding state on changes.
     pub fn edit_text(&mut self, f: impl FnOnce(&mut String) -> bool) -> bool {
         let changed = f(&mut self.raw_query);
         if changed {
@@ -93,21 +103,25 @@ impl Search {
         changed
     }
 
+    /// Exposes the current raw query string.
     #[must_use]
     pub fn text(&self) -> &str {
         &self.raw_query
     }
 
+    /// Exposes the current search configuration options.
     #[must_use]
     pub const fn options(&self) -> SearchOptions {
         self.options
     }
 
+    /// Returns whether the search is active.
     #[must_use]
     pub const fn is_active(&self) -> bool {
         self.active
     }
 
+    /// Exposes localized error messages if a regex query fails compilation.
     #[must_use]
     pub fn error_message(&self) -> Option<&str> {
         if let Matcher::Invalid(msg) = &self.matcher {
@@ -151,16 +165,19 @@ impl Search {
     }
 }
 
+/// Helper component to render search options and query input widgets.
 pub struct SearchBar<'a> {
     label: &'a str,
 }
 
 impl<'a> SearchBar<'a> {
+    /// Creates a new search bar UI constructor.
     #[must_use]
     pub const fn new(label: &'a str) -> Self {
         Self { label }
     }
 
+    /// Renders search interaction elements, returning `true` if state parameters changed.
     pub fn ui(self, ui: &mut egui::Ui, search: &mut Search) -> bool {
         let mut changed = false;
 

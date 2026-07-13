@@ -1,15 +1,19 @@
-use std::{collections::HashMap, fmt::Write as _};
+//! Custom interactive view states mapped seamlessly to virtualization targets.
+
+use std::{collections::HashMap, fmt::Write as _, sync::Arc};
 
 use compact_str::CompactString;
 use fluent_zero::t;
 use roaring::RoaringBitmap;
+
+use crate::operations::Row as _;
 
 use super::{
     error::TableError,
     filter::Filter,
     header::{ColResponse, ColumnState},
     highlights::Highlights,
-    operations::TableProvider,
+    operations::{RowHierarchy, TableProvider},
 };
 
 #[derive(Debug)]
@@ -27,6 +31,7 @@ pub struct TableChanges {
     pub sort_state: Option<(usize, bool)>,
 }
 
+/// Holds interactive visual properties for columns and selection structures.
 #[derive(Debug, Default)]
 pub struct TableState {
     pub id: CompactString,
@@ -39,10 +44,11 @@ pub struct TableState {
     pub last_clicked_visible_index: Option<usize>,
     pub filter_matches: RoaringBitmap,
     pub filter_cache_dirty: bool,
-    pub sorted_children_cache: HashMap<usize, Vec<usize>, ahash::RandomState>,
+    pub sorted_children_cache: HashMap<usize, Arc<Vec<usize>>, ahash::RandomState>,
 }
 
 impl TableState {
+    /// Constructs and initializes view settings.
     #[must_use]
     pub fn new(id: impl Into<CompactString>, row_count: usize) -> Self {
         Self {
@@ -53,6 +59,7 @@ impl TableState {
         }
     }
 
+    /// Accesses the active filter options defined for each column.
     #[must_use]
     pub fn get_filter_state(&self) -> Vec<(usize, Filter)> {
         self.columns
@@ -68,6 +75,7 @@ impl TableState {
             .collect()
     }
 
+    /// Accesses active sorting criteria (column offset and sorting order).
     #[must_use]
     pub fn get_sort_state(&self) -> Option<(usize, bool)> {
         self.columns
@@ -76,6 +84,7 @@ impl TableState {
             .find_map(|(col_index, col)| col.sort_up.map(|sort_up| (col_index, sort_up)))
     }
 
+    /// Renders dynamic status headers detailing matching selection counts.
     #[must_use]
     pub fn counts_header(&self, row_len: usize) -> String {
         let mut counts = String::with_capacity(64);
@@ -96,6 +105,7 @@ impl TableState {
         counts
     }
 
+    /// Applies header actions (sorting updates and filtering changes) to the active indices.
     pub fn process_responses(
         &mut self,
         provider: &dyn TableProvider,
@@ -166,6 +176,7 @@ impl TableState {
         Ok(())
     }
 
+    /// Sets up a new sorting column constraint and sorts active elements.
     pub fn apply_new_sort(
         &mut self,
         provider: &dyn TableProvider,
@@ -177,6 +188,7 @@ impl TableState {
         provider.sort_active_rows(&mut self.active_rows, sort_col, true)
     }
 
+    /// Evaluates filtering constraints, resetting the active index map.
     pub fn apply_all_filters(
         &mut self,
         provider: &dyn TableProvider,
@@ -186,34 +198,70 @@ impl TableState {
         Ok(())
     }
 
+    /// Brings the active row set up to date only when the view is dirty, returning
+    /// `true` if it was recomputed this call. This is the intended per-frame entry
+    /// point: it is a cheap no-op when nothing has changed, avoiding a full O(N)
+    /// filter pass and sort every frame.
+    ///
+    /// For tree providers this delegates to [`Self::flatten_tree`]; for flat tables
+    /// it reapplies the active filters and (if any) the current sort.
+    pub fn refresh_view(&mut self, provider: &dyn TableProvider) -> Result<bool, TableError> {
+        if !self.filter_cache_dirty {
+            return Ok(false);
+        }
+
+        if provider.is_tree() {
+            self.flatten_tree(provider);
+        } else {
+            self.filter_cache_dirty = false;
+            let filter_state = self.get_filter_state();
+            self.apply_all_filters(provider, &filter_state)?;
+            if let Some((sort_col, sort_up)) = self.get_sort_state() {
+                provider.sort_active_rows(&mut self.active_rows, sort_col, sort_up)?;
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Runs filter constraints incrementally across the already-filtered row set.
     pub fn apply_incremental_filter(
         &mut self,
         provider: &dyn TableProvider,
         filter_col: usize,
         filter: &Filter,
     ) -> Result<(), TableError> {
-        let mut active_mask = vec![false; provider.row_count()];
-        for &idx in &self.active_rows {
-            if idx < active_mask.len() {
-                active_mask[idx] = true;
-            }
-        }
-
         let mut new_active = Vec::with_capacity(self.active_rows.len());
-        let mut row_idx = 0;
 
-        provider.for_all_rows(&mut |row| {
-            if row_idx < active_mask.len() && active_mask[row_idx] {
-                let highlight = self.highlights.get_usize(row_idx);
-                if let Some(cell) = row.cell(filter_col)
-                    && filter.matches(&cell.0, highlight)
-                {
-                    new_active.push(row_idx);
+        // Heuristic: If active rows are fewer than a threshold, look them up directly.
+        if self.active_rows.len() < 1000 {
+            for &row_idx in &self.active_rows {
+                if let Some(row) = provider.row_at(row_idx)? {
+                    let highlight = self.highlights.get_usize(row_idx);
+                    if let Some(cell) = row.cell(filter_col)
+                        && filter.matches(&cell.0, highlight)
+                    {
+                        new_active.push(row_idx);
+                    }
                 }
             }
-            row_idx += 1;
-            Ok(())
-        })?;
+        } else {
+            // Fallback to sequential scan if the active set is large
+            let active_set: RoaringBitmap = self.active_rows.iter().map(|&i| i as u32).collect();
+            let mut row_idx = 0;
+            provider.for_all_rows(&mut |row| {
+                if active_set.contains(row_idx as u32) {
+                    let highlight = self.highlights.get_usize(row_idx);
+                    if let Some(cell) = row.cell(filter_col)
+                        && filter.matches(&cell.0, highlight)
+                    {
+                        new_active.push(row_idx);
+                    }
+                }
+                row_idx += 1;
+                Ok(())
+            })?;
+        }
 
         self.active_rows = new_active;
         Ok(())
@@ -225,81 +273,109 @@ impl TableState {
         &mut self,
         ui: &mut egui::Ui,
         row_index: usize,
-        hierarchy: crate::operations::RowHierarchy,
+        hierarchy: RowHierarchy,
     ) -> bool {
         let mut changed = false;
 
         #[allow(clippy::cast_precision_loss)]
-        let spacing = hierarchy.indent_level as f32 * 16.0;
+        let spacing = hierarchy.indent_level as f32 * 22.0; // Comfortably spaced 22px indent
         if spacing > 0.0 {
             ui.add_space(spacing);
 
             let rect = ui.max_rect();
             let painter = ui.painter();
-            let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(65, 65, 65)); // Guidelines gray
+            let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(65, 65, 65));
 
-            for i in 0..hierarchy.indent_level {
-                #[allow(clippy::cast_precision_loss)]
-                let x = (i as f32).mul_add(16.0, rect.min.x) + 8.0;
+            let dash_length = 2.0;
+            let gap_length = 2.0;
+            let step = dash_length + gap_length;
+            let total_height = rect.max.y - rect.min.y;
 
-                // Draw dashed guideline segments
-                let dash_length = 2.0;
-                let gap_length = 2.0;
-                let step = dash_length + gap_length;
-                let total_height = rect.max.y - rect.min.y;
-                if total_height > 0.0 {
-                    let num_steps = (total_height / step).ceil() as usize;
-                    for step_idx in 0..num_steps {
+            if total_height > 0.0 {
+                let num_steps = (total_height / step).ceil() as usize;
+
+                let segments = (0..hierarchy.indent_level).flat_map(|i| {
+                    #[allow(clippy::cast_precision_loss)]
+                    let x = (i as f32).mul_add(22.0, rect.min.x) + 6.8;
+                    (0..num_steps).map(move |step_idx| {
                         #[allow(clippy::cast_precision_loss)]
                         let segment_y = (step_idx as f32).mul_add(step, rect.min.y);
                         let next_y = (segment_y + dash_length).min(rect.max.y);
-                        painter.line_segment(
+                        egui::Shape::line_segment(
                             [egui::pos2(x, segment_y), egui::pos2(x, next_y)],
                             stroke,
-                        );
+                        )
+                    })
+                });
+
+                painter.extend(segments);
+            }
+        }
+
+        ui.scope(|ui| {
+            // Bypass minimum interactive limits to let the region shrink to its natural 14px size
+            ui.spacing_mut().interact_size.x = 0.0;
+            ui.spacing_mut().button_padding = egui::vec2(2.0, 2.0);
+            ui.spacing_mut().item_spacing.x = 4.0;
+
+            if hierarchy.has_children {
+                let arrow = if hierarchy.is_expanded { "⏷" } else { "⏵" };
+
+                // Allocate an exact interactive rectangle
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
+
+                // Resolve responsive colors based on interaction states
+                let arrow_color = if response.hovered() {
+                    if hierarchy.is_expanded {
+                        ui.visuals().warn_fg_color.linear_multiply(0.9)
+                    } else {
+                        ui.visuals().widgets.hovered.text_color()
                     }
-                }
-            }
-        }
-
-        if hierarchy.has_children {
-            let arrow = if hierarchy.is_expanded { "⏷" } else { "⏵" };
-
-            let arrow_color = if hierarchy.is_expanded {
-                ui.visuals().widgets.active.text_color()
-            } else {
-                ui.visuals().widgets.inactive.text_color()
-            };
-
-            let rich_arrow = egui::RichText::new(arrow).color(arrow_color);
-            if ui
-                .selectable_label(hierarchy.is_expanded, rich_arrow)
-                .clicked()
-            {
-                if hierarchy.is_expanded {
-                    self.expanded_rows.remove(row_index as u32);
+                } else if hierarchy.is_expanded {
+                    ui.visuals().widgets.active.text_color()
                 } else {
-                    self.expanded_rows.insert(row_index as u32);
-                }
+                    ui.visuals()
+                        .widgets
+                        .inactive
+                        .text_color()
+                        .linear_multiply(0.5)
+                };
 
-                self.sorted_children_cache.remove(&row_index);
-                changed = true;
+                // Draw the glyph centered inside the allocated rectangle
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    arrow,
+                    egui::FontId::proportional(11.0),
+                    arrow_color,
+                );
+
+                if response.clicked() {
+                    if hierarchy.is_expanded {
+                        self.expanded_rows.remove(row_index as u32);
+                    } else {
+                        self.expanded_rows.insert(row_index as u32);
+                    }
+
+                    self.sorted_children_cache.remove(&row_index);
+                    changed = true;
+                }
+            } else {
+                let dummy_arrow = egui::RichText::new("⏵").color(egui::Color32::TRANSPARENT);
+                ui.add_enabled_ui(false, |ui| {
+                    let _ = ui.selectable_label(false, dummy_arrow);
+                });
             }
-        } else {
-            // Render an invisible, disabled placeholder label to reserve the exact layout footprint
-            let dummy_arrow = egui::RichText::new("⏵").color(egui::Color32::TRANSPARENT);
-            ui.add_enabled_ui(false, |ui| {
-                let _ = ui.selectable_label(false, dummy_arrow);
-            });
-        }
+        });
 
         changed
     }
 
+    /// Evaluates clicks and modifier keys to update row selections.
     pub fn handle_row_selection(&mut self, modifiers: egui::Modifiers, row_index: usize) {
         let selected_rows = &mut self.selected_rows;
         let active_rows = &self.active_rows;
-
         let row_idx_u32 = row_index as u32;
 
         if modifiers.command || modifiers.ctrl {
@@ -400,20 +476,23 @@ impl TableState {
 
         let is_expanded = self.expanded_rows.contains(row_idx as u32);
         if is_expanded {
-            // Retrieve stable sibling order from cache or sort once on cache-miss
+            // `Arc::clone` is a cheap refcount bump and lets us hand the children to
+            // the recursive `&mut self` call without cloning the underlying `Vec`.
             let sorted_children = if let Some(cached) = self.sorted_children_cache.get(&row_idx) {
-                cached.clone()
+                Arc::clone(cached)
             } else {
                 let mut children = provider.row_children(row_idx);
                 let sort_state = self.get_sort_state();
                 if let Some((sort_col, sort_up)) = sort_state {
                     let _ = provider.sort_active_rows(&mut children, sort_col, sort_up);
                 }
-                self.sorted_children_cache.insert(row_idx, children.clone());
+                let children = Arc::new(children);
+                self.sorted_children_cache
+                    .insert(row_idx, Arc::clone(&children));
                 children
             };
 
-            for child_idx in sorted_children {
+            for &child_idx in sorted_children.iter() {
                 self.flatten_tree_impl(provider, child_idx, out);
             }
         }
