@@ -105,31 +105,18 @@ pub fn show_header_cell_contents(
     let show_ellipsis = has_filter || is_hovered || popup_open;
     let show_sort = is_sorted || is_hovered;
 
-    let right_padding = 4.0f32;
-    let icon_gap = 4.0f32;
+    let right_padding = 8.0f32;
     let mut solid_width = 0.0f32;
     let mut ellipsis_center_x = None;
-    let mut sort_center_x = None;
 
     let cell_width = gapless_rect.width();
     let right_x = gapless_rect.max.x;
 
-    if !ui.is_sizing_pass() && cell_width > 20.0 && (show_ellipsis || show_sort) {
-        let mut current_offset = right_padding;
-
-        if show_ellipsis {
-            ellipsis_center_x = Some(right_x - current_offset - 6.0); // 12px width
-            current_offset += 12.0;
-        }
-
-        if show_sort {
-            if show_ellipsis {
-                current_offset += icon_gap;
-            }
-            sort_center_x = Some(right_x - current_offset - 7.0); // 14px width
-            current_offset += 14.0;
-        }
-        solid_width = current_offset;
+    // Only reserve solid width for the ellipsis on the far right
+    if !ui.is_sizing_pass() && cell_width > 20.0 && show_ellipsis {
+        let current_offset = right_padding;
+        ellipsis_center_x = Some(right_x - current_offset - 6.0); // 12px width
+        solid_width = current_offset + 12.0;
     }
 
     ui.horizontal(|ui| {
@@ -141,25 +128,82 @@ pub fn show_header_cell_contents(
                     .selectable(false)
                     .wrap_mode(ui.wrap_mode()),
             );
-
+            if show_sort {
+                let sort_text = match sort_up {
+                    Some(false) => "🔺",
+                    Some(true) | None => "🔻",
+                };
+                let font_id = egui::FontId::proportional(11.0);
+                ui.add(
+                    egui::Label::new(egui::RichText::new(sort_text).font(font_id))
+                        .selectable(false),
+                );
+            }
             ui.add_space(8.0);
         } else {
             // Allocate the text container with a restricted layout width.
-            let max_text_width = cell_width - solid_width - 12.0; // Left padding + safety gap
+            // Left padding is 8.0, safety gap is 4.0. Total non-text offset from left is 12.0.
+            let max_container_width = (cell_width - solid_width - 12.0).max(0.0);
             ui.allocate_ui(
-                egui::vec2(max_text_width.max(0.0), ui.available_height()),
+                egui::vec2(max_container_width, ui.available_height()),
                 |ui| {
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(text).strong())
-                            .selectable(false)
-                            .wrap_mode(egui::TextWrapMode::Truncate),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+
+                        let sort_width = if show_sort { 14.0 } else { 0.0 };
+                        let max_text_width = (max_container_width - sort_width).max(0.0);
+
+                        ui.allocate_ui(egui::vec2(max_text_width, ui.available_height()), |ui| {
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(text).strong())
+                                    .selectable(false)
+                                    .wrap_mode(egui::TextWrapMode::Truncate),
+                            );
+                        });
+
+                        if show_sort {
+                            let sort_text = match sort_up {
+                                Some(false) => "🔺",
+                                Some(true) | None => "🔻",
+                            };
+                            let sort_color = if sort_up.is_some() {
+                                ui.visuals().widgets.active.text_color()
+                            } else {
+                                ui.visuals()
+                                    .widgets
+                                    .inactive
+                                    .text_color()
+                                    .linear_multiply(0.4)
+                            };
+
+                            let font_id = egui::FontId::proportional(11.0);
+                            let sort_response = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(sort_text)
+                                        .font(font_id)
+                                        .color(sort_color),
+                                )
+                                .selectable(false),
+                            );
+
+                            // Keep the sorting click interaction alive for the inline indicator icon
+                            let sort_rect = sort_response.rect;
+                            let sort_interact_response = ui.interact(
+                                sort_rect,
+                                unique_id.with("sort_interact"),
+                                egui::Sense::click(),
+                            );
+                            if sort_interact_response.clicked() {
+                                response.to_sort = true;
+                            }
+                        }
+                    });
                 },
             );
         }
     });
 
-    if !ui.is_sizing_pass() && (show_ellipsis || show_sort) && cell_width > 20.0 {
+    if !ui.is_sizing_pass() && show_ellipsis && cell_width > 20.0 {
         let center_y = gapless_rect.center().y;
 
         // Render & Interact with Vertical Ellipsis Button
@@ -196,43 +240,6 @@ pub fn show_header_cell_contents(
                 ui.painter()
                     .circle_filled(dot_center, dot_radius, dot_color);
             }
-        }
-
-        // Render & Interact with Sort Indicator
-        if let Some(cx) = sort_center_x {
-            let sort_rect =
-                egui::Rect::from_center_size(egui::pos2(cx, center_y), egui::vec2(14.0, 14.0));
-
-            let sort_text = match sort_up {
-                Some(false) => "🔺",
-                Some(true) | None => "🔻",
-            };
-
-            let sort_response = ui.interact(
-                sort_rect,
-                unique_id.with("sort_interact"),
-                egui::Sense::click(),
-            );
-            if sort_response.clicked() {
-                response.to_sort = true;
-            }
-
-            let font_id = egui::FontId::proportional(11.0);
-            ui.painter().text(
-                sort_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                sort_text,
-                font_id,
-                if sort_up.is_some() {
-                    ui.visuals().widgets.active.text_color()
-                } else {
-                    ui.visuals()
-                        .widgets
-                        .inactive
-                        .text_color()
-                        .linear_multiply(0.4)
-                },
-            );
         }
     }
 
