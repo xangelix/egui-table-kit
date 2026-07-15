@@ -42,6 +42,11 @@ pub trait Row {
     fn cell(&self, col_index: usize) -> Option<TableCell<'_>>;
     fn column_count(&self) -> usize;
 
+    /// Returns the physical index of this row within the provider, if available.
+    fn row_index(&self) -> Option<usize> {
+        None
+    }
+
     /// Snapshots every column of this row into an [`OwnedRow`], detaching it from
     /// the provider's borrow lifetime so it can be cached.
     fn to_owned_row(&self) -> OwnedRow {
@@ -139,6 +144,10 @@ impl Row for BorrowedRow<'_> {
             .cell_at(self.row_index, col_index)
             .ok()
             .flatten()
+    }
+
+    fn row_index(&self) -> Option<usize> {
+        Some(self.row_index)
     }
 
     fn column_count(&self) -> usize {

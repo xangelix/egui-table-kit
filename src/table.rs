@@ -114,7 +114,7 @@ impl<'a> TableKit<'a> {
         self
     }
 
-    pub fn show<F>(self, ui: &mut egui::Ui, custom_cell_ui: F) -> Result<(), TableError>
+    pub fn show<F>(self, ui: &mut egui::Ui, custom_cell_ui: F) -> Result<egui::Response, TableError>
     where
         F: FnMut(
                 &mut egui::Ui,
@@ -159,7 +159,7 @@ impl<'a> TableKit<'a> {
         let mut collected_responses = Vec::new();
         let mut halt_error = None;
 
-        {
+        let response = {
             let mut item_clicked = None;
             let mut secondary_clicked = None;
 
@@ -175,13 +175,12 @@ impl<'a> TableKit<'a> {
                 &mut secondary_clicked,
             );
             delegate.row_height = self.row_height;
-            // Pass the configuration variables to the delegate
             delegate.striped = self.striped;
             delegate.striping_color = self.striping_color;
             delegate.hover_color = self.hover_color;
 
-            table.show(ui, &mut delegate);
-        }
+            table.show(ui, &mut delegate)
+        };
 
         if let Some(err) = halt_error {
             return Err(err);
@@ -190,6 +189,6 @@ impl<'a> TableKit<'a> {
         self.state
             .process_responses(self.provider, collected_responses)?;
 
-        Ok(())
+        Ok(response)
     }
 }
