@@ -255,9 +255,9 @@ impl TableDelegate for TableKitDelegate<'_> {
 
         let mut rendered = false;
 
-        // Custom padding configuration to pull Column 0 snug to the expand arrow
+        // Custom padding configuration to pull Column 0 snug to the expand arrow ONLY when rendering a tree
         let mut padding = self.cell_padding;
-        if cell.col_nr == 0 {
+        if cell.col_nr == 0 && self.provider.is_tree() {
             padding.left = 0;
             padding.right = 4;
         }
