@@ -221,30 +221,53 @@ impl TableDelegate for TableKitDelegate<'_> {
             ui.visuals().widgets.inactive.text_color()
         };
 
-        // Adjust the click-sensing area on Column 0 to protect expand/collapse button hits
+        // Adjust the click-sensing area on Column 0 to protect expand/collapse button hits.
+        // Only the arrow itself (14px plus its trailing 8px gap) is carved out; the indent
+        // strip left of it keeps its own interact zone so clicks there still select the row.
         let mut interact_rect = cell_rect;
+        let mut indent_strip_rect = None;
         if cell.col_nr == 0
             && self.provider.is_tree()
             && let Some(hierarchy) = self.provider.row_hierarchy(self.state, row_idx)
         {
             #[allow(clippy::cast_precision_loss)]
-            let indent_width = (hierarchy.indent_level as f32).mul_add(22.0, 22.0);
-            interact_rect.min.x = (interact_rect.min.x + indent_width).min(interact_rect.max.x);
+            let indent_width = hierarchy.indent_level as f32 * 22.0;
+            let strip_end = (interact_rect.min.x + indent_width).min(interact_rect.max.x);
+            if strip_end > interact_rect.min.x {
+                indent_strip_rect = Some(egui::Rect::from_min_max(
+                    interact_rect.min,
+                    egui::pos2(strip_end, interact_rect.max.y),
+                ));
+            }
+            interact_rect.min.x = (strip_end + 22.0).min(interact_rect.max.x);
         }
 
         // Set up cell interaction triggers using layout coordinates to prevent transition collisions
+        let mut handle_row_click = |response: &egui::Response| {
+            if response.clicked() {
+                *self.item_clicked = Some(row_idx);
+                self.state
+                    .handle_row_selection(ui.input(|i| i.modifiers), row_idx);
+            }
+            if response.secondary_clicked() {
+                *self.secondary_clicked = Some(row_idx);
+            }
+        };
+
         let response = ui.interact(
             interact_rect,
             ui.id().with((cell.row_nr, cell.col_nr)),
             Sense::click(),
         );
-        if response.clicked() {
-            *self.item_clicked = Some(row_idx);
-            self.state
-                .handle_row_selection(ui.input(|i| i.modifiers), row_idx);
-        }
-        if response.secondary_clicked() {
-            *self.secondary_clicked = Some(row_idx);
+        handle_row_click(&response);
+
+        if let Some(strip_rect) = indent_strip_rect {
+            let strip_response = ui.interact(
+                strip_rect,
+                ui.id().with((cell.row_nr, cell.col_nr, "indent_strip")),
+                Sense::click(),
+            );
+            handle_row_click(&strip_response);
         }
 
         // Construct the zero-allocation borrowed row representation
