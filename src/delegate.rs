@@ -222,13 +222,16 @@ impl TableDelegate for TableKitDelegate<'_> {
         };
 
         // Adjust the click-sensing area on Column 0 to protect expand/collapse button hits.
-        // Only the arrow itself (14px plus its trailing 8px gap) is carved out; the indent
-        // strip left of it keeps its own interact zone so clicks there still select the row.
+        // Only the arrow itself (14px) plus its surrounding spacing is carved out; the
+        // indent strip left of it keeps its own interact zone so clicks there still select
+        // the row. Rows without children have a disabled placeholder arrow, so no
+        // carve-out is needed.
         let mut interact_rect = cell_rect;
         let mut indent_strip_rect = None;
         if cell.col_nr == 0
             && self.provider.is_tree()
             && let Some(hierarchy) = self.provider.row_hierarchy(self.state, row_idx)
+            && hierarchy.has_children
         {
             #[allow(clippy::cast_precision_loss)]
             let indent_width = hierarchy.indent_level as f32 * 22.0;
@@ -239,7 +242,8 @@ impl TableDelegate for TableKitDelegate<'_> {
                     egui::pos2(strip_end, interact_rect.max.y),
                 ));
             }
-            interact_rect.min.x = (strip_end + 22.0).min(interact_rect.max.x);
+            // Item spacing (8px) + arrow (14px) + trailing gap (4px)
+            interact_rect.min.x = (strip_end + 26.0).min(interact_rect.max.x);
         }
 
         // Set up cell interaction triggers using layout coordinates to prevent transition collisions
