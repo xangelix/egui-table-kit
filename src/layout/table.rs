@@ -1040,6 +1040,9 @@ impl SplitScrollDelegate for TableSplitScrollDelegate<'_> {
         let header_bottom = self.header_row_y.last().copied().unwrap_or(0.0);
         let clip_bottom = ui.clip_rect().bottom();
 
+        let is_sticky_quadrant = self.table.num_sticky_cols > 0
+            && ui.clip_rect().max.x <= self.col_x[self.table.num_sticky_cols] + 5.0;
+
         // 1. Pre-interaction pass: interact with all visible lines exactly once.
         // visible_column_lines contains right-body from this frame, and left-body/headers from the previous frame.
         for (
@@ -1053,6 +1056,13 @@ impl SplitScrollDelegate for TableSplitScrollDelegate<'_> {
             let col_nr = *col_nr;
             if self.col_interaction.contains_key(&col_nr) {
                 continue; // Already interacted this frame
+            }
+            if is_sticky_quadrant {
+                if col_nr >= self.table.num_sticky_cols {
+                    continue;
+                }
+            } else if col_nr < self.table.num_sticky_cols {
+                continue;
             }
 
             let Some(column) = self.table.columns.get(col_nr) else {
@@ -1100,6 +1110,14 @@ impl SplitScrollDelegate for TableSplitScrollDelegate<'_> {
         // 2. Paint the body lines for this quadrant
         for (col_nr, ColumnResizer { scroll_offset, top }) in &self.visible_column_lines {
             let col_nr = *col_nr;
+            if is_sticky_quadrant {
+                if col_nr >= self.table.num_sticky_cols {
+                    continue;
+                }
+            } else if col_nr < self.table.num_sticky_cols {
+                continue;
+            }
+
             let Some(column) = self.table.columns.get(col_nr) else {
                 continue;
             };

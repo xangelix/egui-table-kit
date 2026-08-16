@@ -153,8 +153,10 @@ impl SplitScroll {
             }
 
             // 3. PAINT OVERLAYS (Left)
-            // Paint lines over sticky areas. Clipped to left_rect.
-            let left_rect = rect.with_max_x(rect.left() + fixed_size.x);
+            // Paint lines over sticky areas. Clipped to left_rect plus stroke width allowance so boundary line renders.
+            let stroke_width = ui.visuals().widgets.noninteractive.bg_stroke.width.max(1.0);
+            let left_rect =
+                rect.with_max_x((rect.left() + fixed_size.x + stroke_width).min(rect.max.x));
             let mut left_ui = ui.new_child(UiBuilder::new().max_rect(left_rect));
             left_ui.shrink_clip_rect(left_rect);
             delegate.paint_overlays(&mut left_ui);
