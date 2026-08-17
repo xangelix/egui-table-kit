@@ -33,6 +33,9 @@ pub struct TableState {
     pub col_widths: IdMap<f32>,
 
     pub parent_width: Option<f32>,
+
+    #[serde(default)]
+    pub scroll_offset: Option<Vec2>,
 }
 
 impl TableState {
@@ -453,6 +456,39 @@ impl Table {
             }
         }
 
+        // Apply active column dragging at the start of the frame so that col_x,
+        // sticky_size, quadrant clip rects, and cell layouts are immediately computed
+        // with the new dragged width instead of lagging by 1 frame or clipping sticky separators.
+        if ui.input(|i| i.pointer.primary_down())
+            && let Some(pointer) = ui.ctx().pointer_latest_pos()
+        {
+            let table_min_x = ui.cursor().min.x;
+            let scroll_x = state.scroll_offset.unwrap_or(Vec2::ZERO).x;
+            let mut col_left = table_min_x;
+
+            for (i, column) in self.columns.iter_mut().enumerate() {
+                let column_id = column.id_for(i);
+                let header_resize_id = id.with(column_id).with("resize_header");
+                let body_resize_id = id.with(column_id).with("resize_body");
+                let is_dragged = ui.ctx().is_being_dragged(header_resize_id)
+                    || ui.ctx().is_being_dragged(body_resize_id);
+
+                if is_dragged {
+                    let screen_col_left = if i < self.num_sticky_cols {
+                        col_left
+                    } else {
+                        col_left - scroll_x
+                    };
+                    let new_width = pointer.x - screen_col_left;
+                    let clamped_width = column.range.clamp(new_width);
+                    state.col_widths.insert(column_id, clamped_width);
+                    column.current = clamped_width;
+                }
+
+                col_left += column.current;
+            }
+        }
+
         // Only do full sizing pass if there are any columns that actually need to be auto-fitted
         let do_full_sizing_pass = is_new
             && self
@@ -515,10 +551,15 @@ impl Table {
 
                 for (col_nr, column) in self.columns.iter_mut().enumerate() {
                     if column.is_resizable() {
-                        let column_resize_id = id.with(column.id_for(col_nr)).with("resize");
-                        if let Some(response) = ui.read_response(column_resize_id)
-                            && response.double_clicked()
-                        {
+                        let header_resize_id = id.with(column.id_for(col_nr)).with("resize_header");
+                        let body_resize_id = id.with(column.id_for(col_nr)).with("resize_body");
+                        let double_clicked = ui
+                            .read_response(header_resize_id)
+                            .is_some_and(|r| r.double_clicked())
+                            || ui
+                                .read_response(body_resize_id)
+                                .is_some_and(|r| r.double_clicked());
+                        if double_clicked {
                             column.flags.set(ColumnFlags::AUTO_SIZE_THIS_FRAME, true);
                         }
                     }
@@ -586,8 +627,7 @@ impl Table {
                         visible_column_lines: BTreeMap::default(),
                         do_full_sizing_pass,
                         has_prefetched: false,
-                        egui_ctx: ui.clone(),
-                        col_interaction: BTreeMap::default(),
+                        egui_ctx: ui.ctx().clone(),
                         dragging_col: None,
                     },
                 );
@@ -641,7 +681,6 @@ struct TableSplitScrollDelegate<'a> {
 
     egui_ctx: Context,
 
-    col_interaction: BTreeMap<usize, (bool, bool)>,
     dragging_col: Option<usize>,
 }
 
@@ -775,9 +814,20 @@ impl TableSplitScrollDelegate<'_> {
             }
         }
 
-        // Repaint separator lines over the headers so they aren't covered by header backgrounds.
+        let is_sticky_quadrant = self.table.num_sticky_cols > 0
+            && ui.clip_rect().max.x <= self.col_x[self.table.num_sticky_cols] + 5.0;
+
+        // Repaint separator lines over the headers and handle resize interaction in the header
         for (col_nr, ColumnResizer { scroll_offset, top }) in &self.visible_column_lines {
             let col_nr = *col_nr;
+            if is_sticky_quadrant {
+                if col_nr >= self.table.num_sticky_cols {
+                    continue;
+                }
+            } else if col_nr < self.table.num_sticky_cols {
+                continue;
+            }
+
             let Some(column) = self.table.columns.get(col_nr) else {
                 continue;
             };
@@ -786,25 +836,65 @@ impl TableSplitScrollDelegate<'_> {
             }
 
             let column_id = column.id_for(col_nr);
-            let new_width = self
+            let range = column.range;
+            let current = column.current;
+            let mut column_width = self
                 .state
                 .col_widths
                 .get(&column_id)
                 .copied()
-                .unwrap_or(column.current);
-            let old_width = column.current;
+                .unwrap_or(current);
 
-            let x = self.col_x[col_nr + 1] - scroll_offset.x + (new_width - old_width);
+            let mut x = self.col_x[col_nr + 1] - scroll_offset.x + (column_width - current);
             let yrange = Rangef::new(*top, last_header_row_y);
 
-            let (hovered, dragged) = self
-                .col_interaction
-                .get(&col_nr)
-                .copied()
-                .unwrap_or((false, false));
-            let stroke = if dragged {
+            let line_rect = egui::Rect::from_x_y_ranges(x..=x, yrange.min..=yrange.max)
+                .expand(ui.style().interaction.resize_grab_radius_side);
+
+            let header_resize_id = self.id.with(column_id).with("resize_header");
+            let body_resize_id = self.id.with(column_id).with("resize_body");
+            let resize_response =
+                ui.interact(line_rect, header_resize_id, egui::Sense::click_and_drag());
+
+            let hovered = resize_response.hovered();
+            let is_dragged = resize_response.dragged()
+                || ui.ctx().is_being_dragged(header_resize_id)
+                || ui.ctx().is_being_dragged(body_resize_id)
+                || self.dragging_col == Some(col_nr);
+
+            if is_dragged && let Some(pointer) = ui.pointer_latest_pos() {
+                let new_width = column_width + pointer.x - x;
+                let clamped_width = range.clamp(new_width);
+                self.state.col_widths.insert(column_id, clamped_width);
+                self.dragging_col = Some(col_nr);
+                column_width = clamped_width;
+                x = self.col_x[col_nr + 1] - scroll_offset.x + (column_width - current);
+            }
+
+            let hovered_col_id = self.id.with("hovered_col_resize");
+            let current_frame = ui.ctx().cumulative_frame_nr();
+            if hovered {
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(hovered_col_id, (current_frame, col_nr)));
+            }
+
+            let is_hovered = if let Some((frame, hovered_col)) = ui
+                .ctx()
+                .data(|d| d.get_temp::<(u64, usize)>(hovered_col_id))
+            {
+                hovered_col == col_nr
+                    && (frame == current_frame || frame == current_frame.saturating_sub(1))
+            } else {
+                false
+            };
+
+            if is_hovered || is_dragged {
+                ui.set_cursor_icon(egui::CursorIcon::ResizeColumn);
+            }
+
+            let stroke = if is_dragged {
                 ui.style().visuals.widgets.active.bg_stroke
-            } else if hovered {
+            } else if is_hovered {
                 ui.style().visuals.widgets.hovered.bg_stroke
             } else {
                 ui.visuals().widgets.noninteractive.bg_stroke
@@ -840,35 +930,48 @@ impl TableSplitScrollDelegate<'_> {
         #[allow(clippy::float_cmp)]
         let row_range = if self.table.num_rows == 0 || viewport.top() == viewport.bottom() {
             0..0
+        } else if self.do_full_sizing_pass {
+            // We do the UI for all rows during a sizing pass, so we can auto-size rows and columns
+            0..self.table.num_rows
         } else {
-            // Only paint the visible rows:
-            let row_idx_at = |y: f32| -> u64 {
-                let row_nr = self.get_row_nr_at_y_offset(y - last_header_row_y);
-                row_nr.at_most(self.table.num_rows.saturating_sub(1))
-            };
+            let row_idx_at = |y: f32| -> u64 { self.get_row_nr_at_y_offset(y - last_header_row_y) };
 
-            let margin = if do_prefetch {
-                1.0 // Handle possible rounding errors in the syncing of the scroll offsets
-            } else {
-                0.0
-            };
-
-            row_idx_at(viewport.min.y - margin)..row_idx_at(viewport.max.y + margin) + 1
+            row_idx_at(viewport.min.y)..row_idx_at(viewport.max.y) + 1
         };
 
         if do_prefetch {
             self.table_delegate.prepare(&PrefetchInfo {
+                visible_rows: row_range.clone(),
                 num_sticky_columns: self.table.num_sticky_cols,
                 visible_columns: col_range.clone(),
-                visible_rows: row_range.clone(),
                 table_id: self.id,
             });
             self.has_prefetched = true;
         } else {
             debug_assert!(
                 self.has_prefetched,
-                "SplitScroll delegate methods called in unexpected order"
+                "TableSplitScrollDelegate::region_ui called without prefetch having happened"
             );
+        }
+
+        // If the table layout has not been properly initialized, don't display
+        if !self.do_full_sizing_pass && self.col_x.len() != self.table.columns.len() + 1 {
+            ui.ctx().request_discard(
+                "SplitScrollDelegate: Table col_x length does not match self.table.columns.len() + 1",
+            );
+            return;
+        }
+
+        if self.header_row_y.len() != self.table.headers.len() + 1 {
+            ui.ctx().request_discard(
+                "SplitScrollDelegate: Table header_row_y length does not match self.table.headers.len() + 1",
+            );
+            return;
+        }
+
+        if last_header_row_y != self.header_row_y[self.header_row_y.len() - 1] {
+            ui.ctx()
+                .request_discard("SplitScroll delegate methods called in unexpected order");
         }
 
         let pointer_pos = ui.ctx().pointer_latest_pos();
@@ -974,7 +1077,15 @@ impl TableSplitScrollDelegate<'_> {
 }
 
 impl SplitScrollDelegate for TableSplitScrollDelegate<'_> {
-    // First to be called
+    fn left_top_ui(&mut self, ui: &mut Ui) {
+        self.header_ui(ui, Vec2::ZERO);
+    }
+
+    fn right_top_ui(&mut self, ui: &mut Ui, scroll_offset: Vec2) {
+        let horizontal_scroll_offset = vec2(scroll_offset.x, 0.0);
+        self.header_ui(ui, horizontal_scroll_offset);
+    }
+
     fn right_bottom_ui(&mut self, ui: &mut Ui, scroll_offset: Vec2) {
         if self.table.scroll_to_columns.is_some() || self.table.scroll_to_rows.is_some() {
             let mut target_rect = ui.clip_rect(); // no scrolling
@@ -1017,16 +1128,8 @@ impl SplitScrollDelegate for TableSplitScrollDelegate<'_> {
             ui.scroll_to_rect(target_rect, target_align);
         }
 
+        self.state.scroll_offset = Some(scroll_offset);
         self.region_ui(ui, scroll_offset, true);
-    }
-
-    fn left_top_ui(&mut self, ui: &mut Ui) {
-        self.header_ui(ui, Vec2::ZERO);
-    }
-
-    fn right_top_ui(&mut self, ui: &mut Ui, scroll_offset: Vec2) {
-        let horizontal_scroll_offset = vec2(scroll_offset.x, 0.0);
-        self.header_ui(ui, horizontal_scroll_offset);
     }
 
     fn left_bottom_ui(&mut self, ui: &mut Ui, scroll_offset: Vec2) {
@@ -1036,78 +1139,13 @@ impl SplitScrollDelegate for TableSplitScrollDelegate<'_> {
 
     fn paint_overlays(&mut self, ui: &mut Ui) {
         let total_rows_height = self.get_row_top_offset(self.table.num_rows);
-        let header_top = self.header_row_y[0];
         let header_bottom = self.header_row_y.last().copied().unwrap_or(0.0);
         let clip_bottom = ui.clip_rect().bottom();
 
         let is_sticky_quadrant = self.table.num_sticky_cols > 0
             && ui.clip_rect().max.x <= self.col_x[self.table.num_sticky_cols] + 5.0;
 
-        // 1. Pre-interaction pass: interact with all visible lines exactly once.
-        // visible_column_lines contains right-body from this frame, and left-body/headers from the previous frame.
-        for (
-            col_nr,
-            ColumnResizer {
-                scroll_offset,
-                top: _,
-            },
-        ) in &self.visible_column_lines
-        {
-            let col_nr = *col_nr;
-            if self.col_interaction.contains_key(&col_nr) {
-                continue; // Already interacted this frame
-            }
-            if is_sticky_quadrant {
-                if col_nr >= self.table.num_sticky_cols {
-                    continue;
-                }
-            } else if col_nr < self.table.num_sticky_cols {
-                continue;
-            }
-
-            let Some(column) = self.table.columns.get(col_nr) else {
-                continue;
-            };
-            if !column.is_resizable() {
-                continue;
-            }
-
-            let column_id = column.id_for(col_nr);
-            let range = column.range;
-            let current = column.current;
-            let column_width = self
-                .state
-                .col_widths
-                .get(&column_id)
-                .copied()
-                .unwrap_or(current);
-
-            let x = self.col_x[col_nr + 1] - scroll_offset.x + (column_width - current);
-            let content_bottom = header_bottom + total_rows_height - scroll_offset.y;
-            let line_bottom = clip_bottom.min(content_bottom);
-
-            // Use the full line rect for interaction so dragging works seamlessly
-            let line_rect = egui::Rect::from_x_y_ranges(x..=x, header_top..=line_bottom)
-                .expand(ui.style().interaction.resize_grab_radius_side);
-
-            let column_resize_id = self.id.with(column_id).with("resize");
-            let resize_response =
-                ui.interact(line_rect, column_resize_id, egui::Sense::click_and_drag());
-
-            let hovered = resize_response.hovered();
-            let dragged = resize_response.dragged();
-
-            if dragged && let Some(pointer) = ui.pointer_latest_pos() {
-                let new_width = column_width + pointer.x - x;
-                let clamped_width = range.clamp(new_width);
-                self.state.col_widths.insert(column_id, clamped_width);
-                self.dragging_col = Some(col_nr);
-            }
-
-            self.col_interaction.insert(col_nr, (hovered, dragged));
-        }
-
-        // 2. Paint the body lines for this quadrant
+        // Interaction and painting for body lines
         for (col_nr, ColumnResizer { scroll_offset, top }) in &self.visible_column_lines {
             let col_nr = *col_nr;
             if is_sticky_quadrant {
@@ -1126,32 +1164,67 @@ impl SplitScrollDelegate for TableSplitScrollDelegate<'_> {
             }
 
             let column_id = column.id_for(col_nr);
+            let range = column.range;
             let current = column.current;
-            let column_width = self
+            let mut column_width = self
                 .state
                 .col_widths
                 .get(&column_id)
                 .copied()
                 .unwrap_or(current);
-            let x = self.col_x[col_nr + 1] - scroll_offset.x + (column_width - current);
 
+            let mut x = self.col_x[col_nr + 1] - scroll_offset.x + (column_width - current);
             let content_bottom = header_bottom + total_rows_height - scroll_offset.y;
             let line_bottom = clip_bottom.min(content_bottom);
             let yrange = Rangef::new(*top, line_bottom);
 
-            let (hovered, dragged) = self
-                .col_interaction
-                .get(&col_nr)
-                .copied()
-                .unwrap_or((false, false));
+            let line_rect = egui::Rect::from_x_y_ranges(x..=x, yrange.min..=yrange.max)
+                .expand(ui.style().interaction.resize_grab_radius_side);
 
-            if hovered || dragged {
+            let header_resize_id = self.id.with(column_id).with("resize_header");
+            let body_resize_id = self.id.with(column_id).with("resize_body");
+            let resize_response =
+                ui.interact(line_rect, body_resize_id, egui::Sense::click_and_drag());
+
+            let hovered = resize_response.hovered();
+            let is_dragged = resize_response.dragged()
+                || ui.ctx().is_being_dragged(header_resize_id)
+                || ui.ctx().is_being_dragged(body_resize_id)
+                || self.dragging_col == Some(col_nr);
+
+            if is_dragged && let Some(pointer) = ui.pointer_latest_pos() {
+                let new_width = column_width + pointer.x - x;
+                let clamped_width = range.clamp(new_width);
+                self.state.col_widths.insert(column_id, clamped_width);
+                self.dragging_col = Some(col_nr);
+                column_width = clamped_width;
+                x = self.col_x[col_nr + 1] - scroll_offset.x + (column_width - current);
+            }
+
+            let hovered_col_id = self.id.with("hovered_col_resize");
+            let current_frame = ui.ctx().cumulative_frame_nr();
+            if hovered {
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(hovered_col_id, (current_frame, col_nr)));
+            }
+
+            let is_hovered = if let Some((frame, hovered_col)) = ui
+                .ctx()
+                .data(|d| d.get_temp::<(u64, usize)>(hovered_col_id))
+            {
+                hovered_col == col_nr
+                    && (frame == current_frame || frame == current_frame.saturating_sub(1))
+            } else {
+                false
+            };
+
+            if is_hovered || is_dragged {
                 ui.set_cursor_icon(egui::CursorIcon::ResizeColumn);
             }
 
-            let stroke = if dragged {
+            let stroke = if is_dragged {
                 ui.style().visuals.widgets.active.bg_stroke
-            } else if hovered {
+            } else if is_hovered {
                 ui.style().visuals.widgets.hovered.bg_stroke
             } else {
                 ui.visuals().widgets.noninteractive.bg_stroke
@@ -1204,9 +1277,6 @@ impl SplitScrollDelegate for TableSplitScrollDelegate<'_> {
 
             self.state.col_widths.insert(column_id, new_width);
         }
-
-        // Clear the interaction state for the next frame
-        self.col_interaction.clear();
 
         // Clear the drag state when the mouse button is released
         if !ui.input(|i| i.pointer.primary_down()) {

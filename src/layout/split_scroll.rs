@@ -114,8 +114,9 @@ impl SplitScroll {
 
             {
                 // LEFT TOP: Fixed
+                let stroke_width = ui.visuals().widgets.noninteractive.bg_stroke.width.max(1.0);
                 let left_top_rect = rect
-                    .with_max_x(rect.left() + fixed_size.x)
+                    .with_max_x((rect.left() + fixed_size.x + stroke_width).min(rect.max.x))
                     .with_max_y(rect.top() + fixed_size.y);
                 let mut left_top_ui = ui.new_child(UiBuilder::new().max_rect(left_top_rect));
                 left_top_ui.shrink_clip_rect(left_top_rect);
