@@ -253,7 +253,7 @@ impl eframe::App for TableApp {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label(self.state.counts_header(self.provider.row_count()));
-                ui.weak("|  💡 Left-click headers for sorts, right-click headers for filters.");
+                ui.weak("|  💡 Left-click headers for sorts, right-click headers for filters, right-click rows for actions.");
             });
             ui.add_space(6.0);
 
@@ -293,7 +293,9 @@ impl eframe::App for TableApp {
             let active_rows_count = self.state.active_rows.len();
 
             let Self {
-                provider, state, ..
+                provider,
+                state,
+                operations,
             } = self;
 
             let mut collected_responses = Vec::new();
@@ -394,6 +396,49 @@ impl eframe::App for TableApp {
             drop(delegate);
 
             let _ = state.process_responses(provider, collected_responses);
+
+            // Context menu for content rows
+            let row_context_menu_id = ui.make_persistent_id("row_context_menu");
+            let anchor_pos_id = ui.make_persistent_id("row_context_menu_anchor_pos");
+
+            let mut click_anchor: Option<egui::Pos2> = ui.data_mut(|d| d.get_temp(anchor_pos_id));
+
+            if let Some(row_idx) = secondary_clicked {
+                if !state.selected_rows.contains(row_idx as u32) {
+                    state.selected_rows.clear();
+                    state.selected_rows.insert(row_idx as u32);
+                }
+                if let Some(pos) = ui.ctx().pointer_latest_pos() {
+                    ui.data_mut(|d| d.insert_temp(anchor_pos_id, pos));
+                    click_anchor = Some(pos);
+                }
+                egui::Popup::open_id(ui.ctx(), row_context_menu_id);
+            }
+
+            let popup_open = egui::Popup::is_id_open(ui.ctx(), row_context_menu_id);
+
+            if let Some(pos) = click_anchor {
+                let anchor_rect = egui::Rect::from_center_size(pos, egui::Vec2::splat(1.0));
+                let anchor_response = ui.interact(
+                    anchor_rect,
+                    ui.make_persistent_id("row_context_menu_dummy_anchor"),
+                    egui::Sense::hover(),
+                );
+
+                egui::Popup::menu(&anchor_response)
+                    .id(row_context_menu_id)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
+                        egui_table_kit::header::set_menu_style(ui.style_mut());
+                        let _ = operations.gui(ui, provider, state, true);
+                    });
+            }
+
+            if !popup_open {
+                ui.data_mut(|d| {
+                    d.remove::<egui::Pos2>(anchor_pos_id);
+                });
+            }
         });
     }
 }
