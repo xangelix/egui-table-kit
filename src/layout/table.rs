@@ -997,7 +997,7 @@ impl TableSplitScrollDelegate<'_> {
                     && visible_row_rect.min.y <= pos.y
                     && pos.y < visible_row_rect.max.y;
 
-                if contains_exclusive {
+                if contains_exclusive && ui.rect_contains_pointer(visible_row_rect) {
                     ui.ctx()
                         .data_mut(|d| d.insert_temp(hovered_row_id, (current_frame, row_nr)));
                 }
