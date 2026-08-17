@@ -145,25 +145,76 @@ struct TableApp {
 
 impl Default for TableApp {
     fn default() -> Self {
+        let first_names = [
+            "Alice", "Bob", "Charlie", "Diana", "Evan", "Fiona", "George", "Hannah", "Ian",
+            "Julia", "Kevin", "Laura", "Marcus", "Nina", "Oliver", "Paula",
+        ];
+        let last_names = [
+            "Smith", "Jones", "Taylor", "Brown", "Wilson", "Davies", "Evans", "Thomas", "Johnson",
+            "Roberts", "Walker", "Wright", "Robinson", "Thompson", "White", "Hughes",
+        ];
+        let roles = [
+            "Software Engineer",
+            "Product Designer",
+            "Engineering Manager",
+            "QA Lead",
+            "DevOps Engineer",
+            "Data Scientist",
+            "Frontend Specialist",
+            "Security Analyst",
+        ];
+        let departments = [
+            "Core Platform",
+            "UI & UX",
+            "Infrastructure",
+            "Quality Assurance",
+            "Data Intelligence",
+            "Product Growth",
+            "Security Ops",
+        ];
+        let locations = [
+            "San Francisco",
+            "London",
+            "Tokyo",
+            "Berlin",
+            "New York",
+            "Remote",
+            "Austin",
+            "Zurich",
+        ];
+        let statuses = ["Active", "Away", "In Meeting", "On Leave", "Offline"];
+
+        let records = (0..100)
+            .map(|i| {
+                let first = first_names[i % first_names.len()];
+                let last = last_names[(i * 3 + 1) % last_names.len()];
+                let name = format!("{first} {last}");
+                let role = roles[(i * 2) % roles.len()].to_string();
+                let dept = departments[(i * 5) % departments.len()].to_string();
+                let loc = locations[(i * 7) % locations.len()].to_string();
+                let status = statuses[(i * 4) % statuses.len()].to_string();
+                let email = format!(
+                    "{}.{}@example.com",
+                    first.to_lowercase(),
+                    last.to_lowercase()
+                );
+                let id = format!("EMP-{:04}", i + 1);
+
+                vec![id, name, role, dept, loc, status, email]
+            })
+            .collect();
+
         let provider = ContactDataset {
-            headers: vec!["Name", "Role", "Status"],
-            records: vec![
-                vec![
-                    "Alice".to_string(),
-                    "Engineer".to_string(),
-                    "Active".to_string(),
-                ],
-                vec![
-                    "Bob".to_string(),
-                    "Designer".to_string(),
-                    "Away".to_string(),
-                ],
-                vec![
-                    "Charlie".to_string(),
-                    "Manager".to_string(),
-                    "Active".to_string(),
-                ],
+            headers: vec![
+                "ID",
+                "Name",
+                "Role",
+                "Department",
+                "Location",
+                "Status",
+                "Email",
             ],
+            records,
         };
 
         let row_count = provider.row_count();
@@ -216,10 +267,17 @@ impl eframe::App for TableApp {
             // Expose table settings with modern, virtualized columns
             let columns = (0..self.provider.column_count())
                 .map(|col_idx| {
-                    let is_last = col_idx == self.provider.column_count() - 1;
-                    let initial_width = if is_last { 150.0 } else { 120.0 };
+                    let initial_width = match col_idx {
+                        0 => 85.0,  // ID (sticky frozen column)
+                        1 => 140.0, // Name
+                        2 => 160.0, // Role
+                        3 => 140.0, // Department
+                        4 => 120.0, // Location
+                        5 => 100.0, // Status
+                        _ => 200.0, // Email
+                    };
                     egui_table_kit::layout::Column::new(initial_width)
-                        .range(15.0..=f32::INFINITY)
+                        .range(30.0..=f32::INFINITY)
                         .resizable(true)
                 })
                 .collect::<Vec<_>>();
@@ -227,6 +285,7 @@ impl eframe::App for TableApp {
             let row_height = 28.0;
             let table = egui_table_kit::layout::Table::new()
                 .id_salt("stable_explorer_table")
+                .num_sticky_cols(1)
                 .num_rows(self.state.active_rows.len() as u64)
                 .columns(columns)
                 .headers([egui_table_kit::layout::HeaderRow::new(row_height)]);
