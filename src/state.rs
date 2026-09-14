@@ -111,11 +111,40 @@ impl TableState {
         provider: &dyn TableProvider,
         responses: Vec<ColResponse>,
     ) -> Result<(), TableError> {
+        let anchor_row = self
+            .last_clicked_visible_index
+            .and_then(|visible| self.active_rows.get(visible))
+            .copied();
         let changes = self.collect_responses(responses);
         let filter_update = changes.filter_update;
         let sort_update = changes.sort_update;
         let filter_state = changes.filter_state;
         let sort_state = changes.sort_state;
+
+        if provider.is_tree() {
+            if let Some(sort_col) = sort_update {
+                let ascending = sort_state.map_or(true, |(previous, ascending)| {
+                    previous != sort_col || !ascending
+                });
+                for (index, column) in self.columns.iter_mut().enumerate() {
+                    column.sort_up = (index == sort_col).then_some(ascending);
+                }
+                self.filter_cache_dirty = true;
+            }
+            if filter_update.is_some() || self.highlights_changed {
+                self.filter_cache_dirty = true;
+            }
+            self.highlights_changed = false;
+            // Sort siblings while traversing the tree. Sorting active_rows directly
+            // detaches descendants from their parents and can move the root itself.
+            if self.filter_cache_dirty {
+                self.sorted_children_cache.clear();
+                self.flatten_tree(provider);
+                self.last_clicked_visible_index = anchor_row
+                    .and_then(|row| self.active_rows.iter().position(|index| *index == row));
+            }
+            return Ok(());
+        }
 
         if self.highlights_changed {
             self.highlights_changed = false;
@@ -184,6 +213,12 @@ impl TableState {
     ) -> Result<(), TableError> {
         for (i, column) in self.columns.iter_mut().enumerate() {
             column.sort_up = if i == sort_col { Some(true) } else { None };
+        }
+        if provider.is_tree() {
+            self.filter_cache_dirty = true;
+            self.sorted_children_cache.clear();
+            self.flatten_tree(provider);
+            return Ok(());
         }
         provider.sort_active_rows(&mut self.active_rows, sort_col, true)
     }
@@ -561,5 +596,133 @@ impl TableStateExt for TableState {
             filter_state,
             sort_state,
         }
+    }
+}
+
+#[cfg(test)]
+mod tree_response_tests {
+    use super::*;
+    use crate::operations::{BorrowedRow, HeaderIter, RowCallback, TableCell};
+    use std::borrow::Cow;
+
+    struct Tree;
+    impl TableProvider for Tree {
+        fn column_count(&self) -> usize {
+            1
+        }
+        fn header(&self, column: usize) -> Option<Cow<'_, str>> {
+            (column == 0).then_some(Cow::Borrowed("Name"))
+        }
+        fn headers(&self) -> HeaderIter<'_> {
+            HeaderIter::new(self)
+        }
+        fn row_count(&self) -> usize {
+            5
+        }
+        fn cell_at(&self, row: usize, col: usize) -> Result<Option<TableCell<'_>>, TableError> {
+            Ok(if col == 0 {
+                ["root", "Zulu", "A file", "Alpha", "Z file"]
+                    .get(row)
+                    .map(|s| (Cow::Borrowed(*s), None))
+            } else {
+                None
+            })
+        }
+        fn for_all_rows(&self, f: &mut RowCallback<'_>) -> Result<(), TableError> {
+            for row_index in 0..5 {
+                f(&BorrowedRow {
+                    provider: self,
+                    row_index,
+                })?;
+            }
+            Ok(())
+        }
+        fn for_selected_rows(
+            &self,
+            state: &TableState,
+            f: &mut RowCallback<'_>,
+        ) -> Result<(), TableError> {
+            for row_index in &state.selected_rows {
+                f(&BorrowedRow {
+                    provider: self,
+                    row_index: row_index as usize,
+                })?;
+            }
+            Ok(())
+        }
+        fn is_tree(&self) -> bool {
+            true
+        }
+        fn row_matches(
+            &self,
+            _state: &TableState,
+            row: usize,
+            filters: &[(usize, Filter)],
+            highlight: Option<u8>,
+        ) -> bool {
+            filters.iter().all(|(column, filter)| {
+                self.cell_at(row, *column)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|(text, _)| filter.matches(&text, highlight))
+            })
+        }
+        fn row_parent(&self, row: usize) -> Option<usize> {
+            [None, Some(0), Some(1), Some(0), Some(3)][row]
+        }
+        fn row_children(&self, row: usize) -> Vec<usize> {
+            match row {
+                0 => vec![1, 3],
+                1 => vec![2],
+                3 => vec![4],
+                _ => vec![],
+            }
+        }
+    }
+
+    #[test]
+    fn header_sort_filter_and_highlight_changes_preserve_tree_order() {
+        let mut state = TableState::new("tree", 5);
+        state.expanded_rows.extend([0, 1, 3]);
+        state.selected_rows.insert(2);
+        state.refresh_view(&Tree).unwrap();
+        state.last_clicked_visible_index = Some(2);
+        let sort = || {
+            vec![ColResponse {
+                to_sort: true,
+                ..Default::default()
+            }]
+        };
+        state.process_responses(&Tree, sort()).unwrap();
+        assert_eq!(state.active_rows, [0, 3, 4, 1, 2]);
+        assert_eq!(state.last_clicked_visible_index, Some(4));
+        state.process_responses(&Tree, sort()).unwrap();
+        assert_eq!(state.active_rows, [0, 1, 2, 3, 4]);
+        assert_eq!(state.last_clicked_visible_index, Some(2));
+        let mut filter = ColResponse::default();
+        filter.filtering.search.set_text("Z file");
+        filter.filtering.search.open();
+        state
+            .process_responses(&Tree, vec![filter.clone()])
+            .unwrap();
+        assert_eq!(state.active_rows, [0, 3, 4]);
+        state.highlights_changed = true;
+        state.process_responses(&Tree, vec![filter]).unwrap();
+        assert_eq!(state.active_rows, [0, 3, 4]);
+        state
+            .process_responses(&Tree, vec![ColResponse::default()])
+            .unwrap();
+        assert_eq!(state.active_rows, [0, 1, 2, 3, 4]);
+        assert!(state.selected_rows.contains(2));
+        assert!(!state.filter_cache_dirty);
+    }
+
+    #[test]
+    fn applying_a_tree_sort_directly_preserves_hierarchy() {
+        let mut state = TableState::new("tree", 5);
+        state.columns.push(ColumnState::default());
+        state.expanded_rows.extend([0, 1, 3]);
+        state.apply_new_sort(&Tree, 0).unwrap();
+        assert_eq!(state.active_rows, [0, 3, 4, 1, 2]);
     }
 }

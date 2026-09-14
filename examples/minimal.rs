@@ -1,3 +1,6 @@
+//! Delegate example: custom cells, sticky columns, filtering and row actions.
+//! See the README for the smaller `TableKit` integration.
+
 use std::borrow::Cow;
 
 use eframe::egui;
@@ -106,7 +109,7 @@ impl TableProvider for ContactDataset {
             .map(|s| (Cow::Borrowed(s.as_str()), None)))
     }
 
-    /// Keeps backward-compatibility wrapper intact for export operations (e.g. clipboard copy)
+    /// Owned snapshots are useful for export; rendering uses `cell_at` directly.
     fn row_at(&self, index: usize) -> Result<Option<OwnedRow>, TableError> {
         Ok(self.records.get(index).map(|record| OwnedRow {
             cells: record
@@ -118,6 +121,13 @@ impl TableProvider for ContactDataset {
 
     fn for_all_rows(&self, f: &mut RowCallback<'_>) -> Result<(), TableError> {
         for record in &self.records {
+            f(&ContactRow { record })?;
+        }
+        Ok(())
+    }
+
+    fn for_row_at(&self, index: usize, f: &mut RowCallback<'_>) -> Result<(), TableError> {
+        if let Some(record) = self.records.get(index) {
             f(&ContactRow { record })?;
         }
         Ok(())
