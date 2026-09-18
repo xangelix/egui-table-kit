@@ -45,6 +45,17 @@ pub struct TableState {
     pub filter_matches: RoaringBitmap,
     pub filter_cache_dirty: bool,
     pub sorted_children_cache: HashMap<usize, Arc<Vec<usize>>, ahash::RandomState>,
+
+    // Row interaction, selection model and keyboard focus state
+    pub selection_mode: crate::interaction::SelectionMode,
+    pub focused_key: Option<egui::Id>,
+    pub anchor_key: Option<egui::Id>,
+
+    #[doc(hidden)]
+    pub event_frame: Option<u64>,
+    #[doc(hidden)]
+    pub frame_events:
+        std::collections::HashSet<(egui::Id, crate::interaction::RowEventKind), ahash::RandomState>,
 }
 
 impl TableState {
@@ -415,37 +426,56 @@ impl TableState {
 
     /// Evaluates clicks and modifier keys to update row selections.
     pub fn handle_row_selection(&mut self, modifiers: egui::Modifiers, row_index: usize) {
-        let selected_rows = &mut self.selected_rows;
+        self.handle_row_selection_at_visible(modifiers, row_index, None);
+    }
+
+    /// Evaluates clicks and modifier keys to update row selections using an optional precomputed visible index.
+    pub fn handle_row_selection_at_visible(
+        &mut self,
+        modifiers: egui::Modifiers,
+        row_index: usize,
+        visible_index: Option<usize>,
+    ) {
         let active_rows = &self.active_rows;
         let row_idx_u32 = row_index as u32;
 
+        let current_visible_pos = visible_index
+            .filter(|&idx| idx < active_rows.len() && active_rows[idx] == row_index)
+            .or_else(|| {
+                if row_index < active_rows.len() && active_rows[row_index] == row_index {
+                    Some(row_index)
+                } else {
+                    active_rows.iter().position(|&r| r == row_index)
+                }
+            });
+
         if modifiers.command || modifiers.ctrl {
-            if selected_rows.contains(row_idx_u32) {
-                selected_rows.remove(row_idx_u32);
+            if self.selected_rows.contains(row_idx_u32) {
+                self.selected_rows.remove(row_idx_u32);
                 self.last_clicked_visible_index = None;
             } else {
-                selected_rows.insert(row_idx_u32);
-                self.last_clicked_visible_index = active_rows.iter().position(|&r| r == row_index);
+                self.selected_rows.insert(row_idx_u32);
+                self.last_clicked_visible_index = current_visible_pos;
             }
         } else if modifiers.shift && self.last_clicked_visible_index.is_some() {
             if let Some(anchor_visible_pos) = self.last_clicked_visible_index
-                && let Some(current_visible_pos) = active_rows.iter().position(|&r| r == row_index)
+                && let Some(cur_pos) = current_visible_pos
             {
-                let start = anchor_visible_pos.min(current_visible_pos);
-                let end = anchor_visible_pos.max(current_visible_pos);
+                let start = anchor_visible_pos.min(cur_pos);
+                let end = anchor_visible_pos.max(cur_pos);
                 for visible_idx in start..=end {
                     if let Some(&actual_row_idx) = active_rows.get(visible_idx) {
-                        selected_rows.insert(actual_row_idx as u32);
+                        self.selected_rows.insert(actual_row_idx as u32);
                     }
                 }
             }
-        } else if selected_rows.len() == 1 && selected_rows.contains(row_idx_u32) {
-            selected_rows.clear();
+        } else if self.selected_rows.len() == 1 && self.selected_rows.contains(row_idx_u32) {
+            self.selected_rows.clear();
             self.last_clicked_visible_index = None;
         } else {
-            selected_rows.clear();
-            selected_rows.insert(row_idx_u32);
-            self.last_clicked_visible_index = active_rows.iter().position(|&r| r == row_index);
+            self.selected_rows.clear();
+            self.selected_rows.insert(row_idx_u32);
+            self.last_clicked_visible_index = current_visible_pos;
         }
     }
 

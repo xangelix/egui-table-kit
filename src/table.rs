@@ -21,6 +21,7 @@ pub struct TableKit<'a> {
     max_rows: Option<u64>,
     columns: Option<Vec<crate::layout::Column>>,
     auto_size_mode: crate::layout::AutoSizeMode,
+    drag_enabled: bool,
     column_map: Option<Vec<usize>>,
 }
 
@@ -45,8 +46,15 @@ impl<'a> TableKit<'a> {
             max_rows: None,
             columns: None,
             auto_size_mode: crate::layout::AutoSizeMode::OnParentResize,
+            drag_enabled: false,
             column_map: None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_drag_enabled(mut self, enabled: bool) -> Self {
+        self.drag_enabled = enabled;
+        self
     }
 
     #[must_use]
@@ -133,6 +141,44 @@ impl<'a> TableKit<'a> {
             ) -> Option<egui::Response>
             + 'a,
     {
+        self.show_internal(ui, custom_cell_ui, false, false)
+            .map(|output| output.response)
+    }
+
+    /// Row events and visible geometry use the same immutable provider snapshot as rendering.
+    pub fn show_with_output<F>(
+        self,
+        ui: &mut egui::Ui,
+        custom_cell_ui: F,
+    ) -> Result<crate::interaction::TableOutput, TableError>
+    where
+        F: FnMut(
+                &mut egui::Ui,
+                &crate::layout::CellInfo,
+                &dyn Row,
+                egui::Color32,
+            ) -> Option<egui::Response>
+            + 'a,
+    {
+        self.show_internal(ui, custom_cell_ui, true, true)
+    }
+
+    fn show_internal<F>(
+        self,
+        ui: &mut egui::Ui,
+        custom_cell_ui: F,
+        track_events: bool,
+        track_geometry: bool,
+    ) -> Result<crate::interaction::TableOutput, TableError>
+    where
+        F: FnMut(
+                &mut egui::Ui,
+                &crate::layout::CellInfo,
+                &dyn Row,
+                egui::Color32,
+            ) -> Option<egui::Response>
+            + 'a,
+    {
         if let Some(map) = &self.column_map {
             let col_count = self.provider.column_count();
             if map.is_empty()
@@ -162,7 +208,7 @@ impl<'a> TableKit<'a> {
         }
 
         // Refresh filter/sorting view when dirty
-        let _ = self.state.refresh_view(self.provider);
+        self.state.refresh_view(self.provider)?;
 
         // Prioritize custom pre-configured layout columns over fallback defaults
         let columns = self.columns.unwrap_or_else(|| {
@@ -199,6 +245,8 @@ impl<'a> TableKit<'a> {
         let mut collected_responses = Vec::new();
         let mut halt_error = None;
 
+        let events;
+        let rows;
         let response = {
             let mut item_clicked = None;
             let mut secondary_clicked = None;
@@ -218,9 +266,21 @@ impl<'a> TableKit<'a> {
             delegate.striped = self.striped;
             delegate.striping_color = self.striping_color;
             delegate.hover_color = self.hover_color;
+            delegate.drag_enabled = self.drag_enabled;
             delegate.column_map = self.column_map;
+            delegate.track_events = track_events;
+            delegate.track_geometry = track_geometry;
+            if track_events {
+                delegate.events.reserve(4);
+            }
+            if track_geometry {
+                delegate.rows.reserve(32);
+            }
 
-            table.show(ui, &mut delegate)
+            let response = table.show(ui, &mut delegate);
+            events = delegate.events;
+            rows = delegate.rows;
+            response
         };
 
         if let Some(err) = halt_error {
@@ -230,7 +290,11 @@ impl<'a> TableKit<'a> {
         self.state
             .process_responses(self.provider, collected_responses)?;
 
-        Ok(response)
+        Ok(crate::interaction::TableOutput {
+            response,
+            events,
+            rows,
+        })
     }
 }
 

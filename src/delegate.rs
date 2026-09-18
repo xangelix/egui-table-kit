@@ -8,6 +8,7 @@ use super::{
     operations::{BorrowedRow, Row, TableProvider},
     state::TableState,
 };
+use crate::interaction::{RowEvent, RowEventKind, RowGeometry, SelectionInput};
 
 /// Shared callback definition used to render custom interactive cellular components.
 pub type CustomCellCallback<'a> =
@@ -37,6 +38,16 @@ pub struct TableKitDelegate<'a> {
     pub striped: bool,
     pub striping_color: Option<Color32>,
     pub hover_color: Option<Color32>,
+
+    /// Opt-in drag sensing; existing consumers keep click-only interaction.
+    pub drag_enabled: bool,
+    /// Whether to collect `RowEvent`s during this pass.
+    pub track_events: bool,
+    /// Whether to calculate and collect `RowGeometry`s during this pass.
+    pub track_geometry: bool,
+    pub events: Vec<RowEvent>,
+    pub rows: Vec<RowGeometry>,
+
     /// Layout-column to provider-column mapping. Keep a tree's column 0 first.
     pub column_map: Option<Vec<usize>>,
 }
@@ -78,8 +89,25 @@ impl<'a> TableKitDelegate<'a> {
             striped: false,
             striping_color: None,
             hover_color: None,
+            drag_enabled: false,
+            track_events: false,
+            track_geometry: false,
+            events: Vec::new(),
+            rows: Vec::new(),
             column_map: None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_track_events(mut self, track: bool) -> Self {
+        self.track_events = track;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_track_geometry(mut self, track: bool) -> Self {
+        self.track_geometry = track;
+        self
     }
 }
 
@@ -93,6 +121,8 @@ impl TableDelegate for TableKitDelegate<'_> {
             self.is_new_pass = false;
             self.collected_responses.clear();
             self.hovered_row = None;
+            self.events.clear();
+            self.rows.clear();
         }
     }
 
@@ -245,6 +275,24 @@ impl TableDelegate for TableKitDelegate<'_> {
 
         if is_tree_changed {
             ui.ctx().request_repaint();
+            if self.track_events {
+                let key = self.provider.row_key(row_idx);
+                let kind = RowEventKind::ExpansionChanged(
+                    self.state.expanded_rows.contains(row_idx as u32),
+                );
+                if self
+                    .state
+                    .accept_event(ui.ctx().cumulative_frame_nr(), key, kind)
+                {
+                    self.events.push(RowEvent {
+                        key,
+                        row_index: row_idx,
+                        kind,
+                        modifiers: ui.input(|i| i.modifiers),
+                        dragged_keys: vec![],
+                    });
+                }
+            }
         }
 
         // Set up cell text color matching selection state
@@ -286,30 +334,191 @@ impl TableDelegate for TableKitDelegate<'_> {
             interact_rect.min.x = (interact_rect.min.x + resize_margin).min(interact_rect.max.x);
         }
 
-        // Set up cell interaction triggers using layout coordinates to prevent transition collisions
-        let mut handle_row_click = |response: &egui::Response| {
-            if response.clicked() {
-                *self.item_clicked = Some(row_idx);
-                self.state
-                    .handle_row_selection(ui.input(|i| i.modifiers), row_idx);
+        let key = self.provider.row_key(row_idx);
+        if self.track_geometry && !ui.is_sizing_pass() {
+            let clipped = cell_rect.intersect(ui.clip_rect());
+            if clipped.is_positive() {
+                let interact_clipped = interact_rect.intersect(ui.clip_rect());
+                let strip_clipped = indent_strip_rect.map(|strip| strip.intersect(ui.clip_rect()));
+
+                let existing_row = if let Some(last) = self.rows.last_mut()
+                    && last.key == key
+                {
+                    Some(last)
+                } else {
+                    self.rows.iter_mut().find(|row| row.key == key)
+                };
+
+                if let Some(row) = existing_row {
+                    row.rect = row.rect.union(clipped);
+                    if interact_clipped.is_positive() {
+                        row.hit_regions.push(interact_clipped);
+                    }
+                    if let Some(strip) = strip_clipped
+                        && strip.is_positive()
+                    {
+                        row.hit_regions.push(strip);
+                    }
+                } else {
+                    let mut hit_regions = Vec::with_capacity(self.provider.column_count() + 1);
+                    if interact_clipped.is_positive() {
+                        hit_regions.push(interact_clipped);
+                    }
+                    if let Some(strip) = strip_clipped
+                        && strip.is_positive()
+                    {
+                        hit_regions.push(strip);
+                    }
+                    self.rows.push(RowGeometry {
+                        key,
+                        row_index: row_idx,
+                        visible_index: current_visible_idx,
+                        rect: clipped,
+                        hit_regions,
+                    });
+                }
             }
-            if response.secondary_clicked() {
+        }
+
+        let sensing = if self.drag_enabled && self.provider.row_selectable(row_idx) {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
+
+        let mut handle_row_click = |response: &egui::Response| {
+            if ui.is_sizing_pass() {
+                return;
+            }
+
+            let is_interacted = response.clicked()
+                || response.double_clicked()
+                || response.secondary_clicked()
+                || (self.drag_enabled
+                    && (response.drag_started_by(egui::PointerButton::Primary)
+                        || response.drag_stopped_by(egui::PointerButton::Primary)));
+            if !is_interacted {
+                return;
+            }
+
+            let modifiers = ui.input(|i| i.modifiers);
+            let frame = ui.ctx().cumulative_frame_nr();
+            if response.clicked() && self.state.accept_event(frame, key, RowEventKind::Clicked) {
+                *self.item_clicked = Some(row_idx);
+                self.state.select_row_at_visible(
+                    self.provider,
+                    row_idx,
+                    Some(current_visible_idx),
+                    modifiers,
+                    SelectionInput::Click,
+                );
+                if self.track_events {
+                    self.events.push(RowEvent {
+                        key,
+                        row_index: row_idx,
+                        kind: RowEventKind::Clicked,
+                        modifiers,
+                        dragged_keys: vec![],
+                    });
+                }
+            }
+            if response.double_clicked()
+                && self.state.accept_event(frame, key, RowEventKind::Activated)
+                && self.track_events
+            {
+                self.events.push(RowEvent {
+                    key,
+                    row_index: row_idx,
+                    kind: RowEventKind::Activated,
+                    modifiers,
+                    dragged_keys: vec![],
+                });
+            }
+            if response.secondary_clicked()
+                && self
+                    .state
+                    .accept_event(frame, key, RowEventKind::SecondaryClicked)
+            {
                 *self.secondary_clicked = Some(row_idx);
+                self.state.select_row_at_visible(
+                    self.provider,
+                    row_idx,
+                    Some(current_visible_idx),
+                    modifiers,
+                    SelectionInput::Context,
+                );
+                if self.track_events {
+                    self.events.push(RowEvent {
+                        key,
+                        row_index: row_idx,
+                        kind: RowEventKind::SecondaryClicked,
+                        modifiers,
+                        dragged_keys: vec![],
+                    });
+                }
+            }
+            if response.drag_started_by(egui::PointerButton::Primary)
+                && self
+                    .state
+                    .accept_event(frame, key, RowEventKind::DragStarted)
+            {
+                self.state.select_row_at_visible(
+                    self.provider,
+                    row_idx,
+                    Some(current_visible_idx),
+                    modifiers,
+                    SelectionInput::Drag,
+                );
+                if self.track_events {
+                    let mut dragged_keys =
+                        Vec::with_capacity(self.state.selected_rows.len() as usize);
+                    dragged_keys.extend(
+                        self.state
+                            .selected_rows
+                            .iter()
+                            .map(|row| row as usize)
+                            .filter(|&row| {
+                                row < self.provider.row_count() && self.provider.row_selectable(row)
+                            })
+                            .map(|row| self.provider.row_key(row)),
+                    );
+                    self.events.push(RowEvent {
+                        key,
+                        row_index: row_idx,
+                        kind: RowEventKind::DragStarted,
+                        modifiers,
+                        dragged_keys,
+                    });
+                }
+            }
+            if response.drag_stopped_by(egui::PointerButton::Primary)
+                && self
+                    .state
+                    .accept_event(frame, key, RowEventKind::DragStopped)
+                && self.track_events
+            {
+                self.events.push(RowEvent {
+                    key,
+                    row_index: row_idx,
+                    kind: RowEventKind::DragStopped,
+                    modifiers,
+                    dragged_keys: vec![],
+                });
             }
         };
 
         let response = ui.interact(
             interact_rect,
-            ui.id().with((cell.row_nr, cell.col_nr)),
-            Sense::click(),
+            cell.table_id.with((key, cell.col_nr)),
+            sensing,
         );
         handle_row_click(&response);
 
         if let Some(strip_rect) = indent_strip_rect {
             let strip_response = ui.interact(
                 strip_rect,
-                ui.id().with((cell.row_nr, cell.col_nr, "indent_strip")),
-                Sense::click(),
+                cell.table_id.with((key, cell.col_nr, "indent_strip")),
+                sensing,
             );
             handle_row_click(&strip_response);
         }
@@ -326,6 +535,27 @@ impl TableDelegate for TableKitDelegate<'_> {
                 return;
             }
         };
+        if let Some((label, _)) = &value {
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::SelectableLabel,
+                    ui.is_enabled(),
+                    is_selected,
+                    label.as_ref(),
+                )
+            });
+        }
+        if self.state.focused_key == Some(key) {
+            let clipped = cell_rect.intersect(ui.clip_rect());
+            if clipped.is_positive() {
+                ui.painter().rect_stroke(
+                    clipped.shrink(1.0),
+                    0.0,
+                    ui.visuals().selection.stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
 
         let mut rendered = false;
 
