@@ -155,12 +155,14 @@ impl SplitScroll {
 
             // 3. PAINT OVERLAYS (Left)
             // Paint lines over sticky areas. Clipped to left_rect plus stroke width allowance so boundary line renders.
-            let stroke_width = ui.visuals().widgets.noninteractive.bg_stroke.width.max(1.0);
-            let left_rect =
-                rect.with_max_x((rect.left() + fixed_size.x + stroke_width).min(rect.max.x));
-            let mut left_ui = ui.new_child(UiBuilder::new().max_rect(left_rect));
-            left_ui.shrink_clip_rect(left_rect);
-            delegate.paint_overlays(&mut left_ui);
+            if fixed_size.x > 0.0 {
+                let stroke_width = ui.visuals().widgets.noninteractive.bg_stroke.width.max(1.0);
+                let left_rect =
+                    rect.with_max_x((rect.left() + fixed_size.x + stroke_width).min(rect.max.x));
+                let mut left_ui = ui.new_child(UiBuilder::new().max_rect(left_rect));
+                left_ui.shrink_clip_rect(left_rect);
+                delegate.paint_overlays(&mut left_ui);
+            }
 
             // 4. UPDATE COL WIDTHS
             // Now that headers and body have populated `max_column_widths`, calculate final sizes.
@@ -168,5 +170,66 @@ impl SplitScroll {
 
             ui.advance_cursor_after_rect(rect);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockDelegate {
+        paint_overlays_count: usize,
+    }
+
+    impl SplitScrollDelegate for MockDelegate {
+        fn left_top_ui(&mut self, _ui: &mut Ui) {}
+        fn right_top_ui(&mut self, _ui: &mut Ui, _scroll_offset: Vec2) {}
+        fn left_bottom_ui(&mut self, _ui: &mut Ui, _scroll_offset: Vec2) {}
+        fn right_bottom_ui(&mut self, _ui: &mut Ui, _scroll_offset: Vec2) {}
+        fn paint_overlays(&mut self, _ui: &mut Ui) {
+            self.paint_overlays_count += 1;
+        }
+    }
+
+    #[test]
+    fn test_split_scroll_skips_left_overlay_when_fixed_width_zero() {
+        let ctx = egui::Context::default();
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut delegate = MockDelegate {
+                paint_overlays_count: 0,
+            };
+            let split_scroll = SplitScroll {
+                scroll_enabled: Vec2b::new(true, true),
+                fixed_size: vec2(0.0, 20.0),
+                scroll_outer_size: vec2(200.0, 200.0),
+                scroll_content_size: vec2(400.0, 400.0),
+                stick_to_bottom: false,
+            };
+            split_scroll.show(ui, &mut delegate);
+            // paint_overlays should only be called once (for bottom-right scroll area), NOT for left
+            assert_eq!(delegate.paint_overlays_count, 1);
+        });
+        full_output.textures_delta.clear();
+    }
+
+    #[test]
+    fn test_split_scroll_paints_left_overlay_when_fixed_width_positive() {
+        let ctx = egui::Context::default();
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut delegate = MockDelegate {
+                paint_overlays_count: 0,
+            };
+            let split_scroll = SplitScroll {
+                scroll_enabled: Vec2b::new(true, true),
+                fixed_size: vec2(50.0, 20.0),
+                scroll_outer_size: vec2(200.0, 200.0),
+                scroll_content_size: vec2(400.0, 400.0),
+                stick_to_bottom: false,
+            };
+            split_scroll.show(ui, &mut delegate);
+            // paint_overlays should be called twice: once for bottom-right and once for left sticky
+            assert_eq!(delegate.paint_overlays_count, 2);
+        });
+        full_output.textures_delta.clear();
     }
 }
