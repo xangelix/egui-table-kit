@@ -21,6 +21,7 @@ pub struct TableKit<'a> {
     max_rows: Option<u64>,
     columns: Option<Vec<crate::layout::Column>>,
     auto_size_mode: crate::layout::AutoSizeMode,
+    column_map: Option<Vec<usize>>,
 }
 
 impl<'a> TableKit<'a> {
@@ -44,6 +45,7 @@ impl<'a> TableKit<'a> {
             max_rows: None,
             columns: None,
             auto_size_mode: crate::layout::AutoSizeMode::OnParentResize,
+            column_map: None,
         }
     }
 
@@ -114,6 +116,13 @@ impl<'a> TableKit<'a> {
         self
     }
 
+    /// Select/reorder provider columns. Custom cell callbacks receive provider column indices.
+    #[must_use]
+    pub fn with_column_map(mut self, columns: Vec<usize>) -> Self {
+        self.column_map = Some(columns);
+        self
+    }
+
     pub fn show<F>(self, ui: &mut egui::Ui, custom_cell_ui: F) -> Result<egui::Response, TableError>
     where
         F: FnMut(
@@ -124,12 +133,43 @@ impl<'a> TableKit<'a> {
             ) -> Option<egui::Response>
             + 'a,
     {
+        if let Some(map) = &self.column_map {
+            let col_count = self.provider.column_count();
+            if map.is_empty()
+                || self
+                    .columns
+                    .as_ref()
+                    .is_some_and(|columns| columns.len() != map.len())
+            {
+                return Err(TableError::CorruptedState);
+            }
+            if col_count <= 64 {
+                let mut seen = 0u64;
+                for &c in map {
+                    if c >= col_count || (seen & (1u64 << c)) != 0 {
+                        return Err(TableError::CorruptedState);
+                    }
+                    seen |= 1u64 << c;
+                }
+            } else {
+                let mut seen = std::collections::HashSet::with_capacity(map.len());
+                for &c in map {
+                    if c >= col_count || !seen.insert(c) {
+                        return Err(TableError::CorruptedState);
+                    }
+                }
+            }
+        }
+
         // Refresh filter/sorting view when dirty
         let _ = self.state.refresh_view(self.provider);
 
         // Prioritize custom pre-configured layout columns over fallback defaults
         let columns = self.columns.unwrap_or_else(|| {
-            (0..self.provider.column_count())
+            (0..self
+                .column_map
+                .as_ref()
+                .map_or(self.provider.column_count(), Vec::len))
                 .map(|_| {
                     crate::layout::Column::new(120.0)
                         .range(15.0..=f32::INFINITY)
@@ -178,6 +218,7 @@ impl<'a> TableKit<'a> {
             delegate.striped = self.striped;
             delegate.striping_color = self.striping_color;
             delegate.hover_color = self.hover_color;
+            delegate.column_map = self.column_map;
 
             table.show(ui, &mut delegate)
         };
@@ -190,5 +231,97 @@ impl<'a> TableKit<'a> {
             .process_responses(self.provider, collected_responses)?;
 
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::operations::{BorrowedRow, HeaderIter, RowCallback, TableCell};
+    use std::borrow::Cow;
+
+    struct TestProvider {
+        names: Vec<&'static str>,
+    }
+    impl TableProvider for TestProvider {
+        fn column_count(&self) -> usize {
+            2
+        }
+        fn header(&self, index: usize) -> Option<Cow<'_, str>> {
+            ["First", "Second"].get(index).map(|s| Cow::Borrowed(*s))
+        }
+        fn headers(&self) -> HeaderIter<'_> {
+            HeaderIter::new(self)
+        }
+        fn row_count(&self) -> usize {
+            self.names.len()
+        }
+        fn cell_at(&self, row: usize, col: usize) -> Result<Option<TableCell<'_>>, TableError> {
+            let val = format!("{}-{}", self.names[row], col);
+            Ok(Some((Cow::Owned(val), None)))
+        }
+        fn for_all_rows(&self, f: &mut RowCallback<'_>) -> Result<(), TableError> {
+            for row_index in 0..self.row_count() {
+                f(&BorrowedRow {
+                    provider: self,
+                    row_index,
+                })?;
+            }
+            Ok(())
+        }
+        fn for_selected_rows(
+            &self,
+            _state: &TableState,
+            _f: &mut RowCallback<'_>,
+        ) -> Result<(), TableError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_invalid_column_maps_return_error() {
+        let provider = TestProvider { names: vec!["A"] };
+        let mut state = TableState::new("test", 1);
+        let ctx = egui::Context::default();
+
+        for map in [vec![], vec![0, 0], vec![2]] {
+            let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let res = TableKit::new("bad_map", &provider, &mut state)
+                    .with_column_map(map.clone())
+                    .show(ui, |_, _, _, _| None);
+                assert!(res.is_err());
+            });
+            full_output.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn test_column_map_reordering_dispatches_provider_indices() {
+        let provider = TestProvider {
+            names: vec!["Item"],
+        };
+        let mut state = TableState::new("test", 1);
+        let ctx = egui::Context::default();
+
+        let mut visited_cols = Vec::new();
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let res = TableKit::new("reorder", &provider, &mut state)
+                .with_column_map(vec![1, 0])
+                .with_columns(vec![
+                    crate::layout::Column::new(100.0),
+                    crate::layout::Column::new(100.0),
+                ])
+                .show(ui, |_ui, cell, _row, _color| {
+                    visited_cols.push(cell.col_nr);
+                    None
+                });
+            assert!(res.is_ok());
+        });
+        full_output.textures_delta.clear();
+
+        // Custom cell callback must receive provider column indices in layout order:
+        // Visual col 0 -> provider col 1
+        // Visual col 1 -> provider col 0
+        assert_eq!(visited_cols, vec![1, 0]);
     }
 }

@@ -37,10 +37,16 @@ pub struct TableKitDelegate<'a> {
     pub striped: bool,
     pub striping_color: Option<Color32>,
     pub hover_color: Option<Color32>,
+    /// Layout-column to provider-column mapping. Keep a tree's column 0 first.
+    pub column_map: Option<Vec<usize>>,
 }
 
 impl<'a> TableKitDelegate<'a> {
     /// Creates a new delegate instance with robust visual defaults.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve the public delegate constructor; TableKit provides the builder API"
+    )]
     pub fn new(
         provider: &'a dyn TableProvider,
         state: &'a mut TableState,
@@ -72,6 +78,7 @@ impl<'a> TableKitDelegate<'a> {
             striped: false,
             striping_color: None,
             hover_color: None,
+            column_map: None,
         }
     }
 }
@@ -90,7 +97,14 @@ impl TableDelegate for TableKitDelegate<'_> {
     }
 
     fn header_cell_ui(&mut self, ui: &mut Ui, cell: &HeaderCellInfo) {
-        let col_idx = cell.col_range.start;
+        let col_idx = match &self.column_map {
+            Some(map) => map.get(cell.col_range.start).copied(),
+            None => Some(cell.col_range.start),
+        };
+        let Some(col_idx) = col_idx.filter(|&c| c < self.provider.column_count()) else {
+            *self.halt_error = Some(TableError::CorruptedState);
+            return;
+        };
         let title = self.provider.header(col_idx).unwrap_or_default();
 
         let default_response = ColResponse::default();
@@ -138,6 +152,25 @@ impl TableDelegate for TableKitDelegate<'_> {
     }
 
     fn cell_ui(&mut self, ui: &mut Ui, cell: &CellInfo) {
+        let layout_col_nr = cell.col_nr;
+        let mapped;
+        let cell = match &self.column_map {
+            Some(map) => {
+                let Some(&column) = map
+                    .get(layout_col_nr)
+                    .filter(|&&c| c < self.provider.column_count())
+                else {
+                    *self.halt_error = Some(TableError::CorruptedState);
+                    return;
+                };
+                mapped = CellInfo {
+                    col_nr: column,
+                    ..*cell
+                };
+                &mapped
+            }
+            None => cell,
+        };
         let current_visible_idx = cell.row_nr as usize;
         let Some(&row_idx) = self.state.active_rows.get(current_visible_idx) else {
             return;
@@ -244,6 +277,13 @@ impl TableDelegate for TableKitDelegate<'_> {
             }
             // Item spacing (8px) + arrow (14px) + trailing gap (4px)
             interact_rect.min.x = (strip_end + 26.0).min(interact_rect.max.x);
+        }
+
+        // Column separators own their resize hit regions, including body handles.
+        let resize_margin = ui.style().interaction.resize_grab_radius_side;
+        interact_rect.max.x = (interact_rect.max.x - resize_margin).max(interact_rect.min.x);
+        if layout_col_nr > 0 {
+            interact_rect.min.x = (interact_rect.min.x + resize_margin).min(interact_rect.max.x);
         }
 
         // Set up cell interaction triggers using layout coordinates to prevent transition collisions
