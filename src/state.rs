@@ -123,9 +123,8 @@ impl TableState {
 
         if provider.is_tree() {
             if let Some(sort_col) = sort_update {
-                let ascending = sort_state.map_or(true, |(previous, ascending)| {
-                    previous != sort_col || !ascending
-                });
+                let ascending = sort_state
+                    .is_none_or(|(previous, ascending)| previous != sort_col || !ascending);
                 for (index, column) in self.columns.iter_mut().enumerate() {
                     column.sort_up = (index == sort_col).then_some(ascending);
                 }
@@ -139,7 +138,7 @@ impl TableState {
             // detaches descendants from their parents and can move the root itself.
             if self.filter_cache_dirty {
                 self.sorted_children_cache.clear();
-                self.flatten_tree(provider);
+                self.flatten_tree(provider)?;
                 self.last_clicked_visible_index = anchor_row
                     .and_then(|row| self.active_rows.iter().position(|index| *index == row));
             }
@@ -217,7 +216,7 @@ impl TableState {
         if provider.is_tree() {
             self.filter_cache_dirty = true;
             self.sorted_children_cache.clear();
-            self.flatten_tree(provider);
+            self.flatten_tree(provider)?;
             return Ok(());
         }
         provider.sort_active_rows(&mut self.active_rows, sort_col, true)
@@ -246,9 +245,8 @@ impl TableState {
         }
 
         if provider.is_tree() {
-            self.flatten_tree(provider);
+            self.flatten_tree(provider)?;
         } else {
-            self.filter_cache_dirty = false;
             let filter_state = self.get_filter_state();
             self.apply_all_filters(provider, &filter_state)?;
             if let Some((sort_col, sort_up)) = self.get_sort_state() {
@@ -256,6 +254,7 @@ impl TableState {
             }
         }
 
+        self.filter_cache_dirty = false;
         Ok(true)
     }
 
@@ -386,7 +385,13 @@ impl TableState {
                     arrow_color,
                 );
 
-                if response.clicked() {
+                let frame = ui.ctx().cumulative_frame_nr();
+                let activation_id = response.id.with("expansion_frame");
+                if response.clicked()
+                    && !ui.is_sizing_pass()
+                    && ui.ctx().data(|d| d.get_temp::<u64>(activation_id)) != Some(frame)
+                {
+                    ui.ctx().data_mut(|d| d.insert_temp(activation_id, frame));
                     if hierarchy.is_expanded {
                         self.expanded_rows.remove(row_index as u32);
                     } else {
@@ -394,6 +399,7 @@ impl TableState {
                     }
 
                     self.sorted_children_cache.remove(&row_index);
+                    self.filter_cache_dirty = true;
                     changed = true;
                 }
             } else {
@@ -484,53 +490,58 @@ impl TableState {
         }
     }
 
-    /// Recursively flattens the visible tree nodes matching the active filters into `active_rows`.
-    pub fn flatten_tree(&mut self, provider: &dyn TableProvider) {
+    /// Iteratively flattens the visible tree nodes matching the active filters into `active_rows`.
+    ///
+    /// Returns `Err(TableError::CorruptedState)` if a cycle or out-of-bounds row index is detected.
+    pub fn flatten_tree(&mut self, provider: &dyn TableProvider) -> Result<(), TableError> {
         self.rebuild_tree_filter_cache(provider);
-
         let mut active = Vec::with_capacity(provider.row_count());
+        let mut stack = Vec::with_capacity(provider.row_count().min(64));
         if provider.row_count() > 0 {
-            // Flatten from the root node (0) downwards
-            self.flatten_tree_impl(provider, 0, &mut active);
+            stack.push(0);
         }
-        self.active_rows = active;
-    }
-
-    fn flatten_tree_impl(
-        &mut self,
-        provider: &dyn TableProvider,
-        row_idx: usize,
-        out: &mut Vec<usize>,
-    ) {
-        // Fast, O(log C) random access check over compressed roaring bitmap containers
-        if !self.filter_matches.contains(row_idx as u32) {
-            return; // Subtree does not match filters: discard early
-        }
-
-        out.push(row_idx);
-
-        let is_expanded = self.expanded_rows.contains(row_idx as u32);
-        if is_expanded {
-            // `Arc::clone` is a cheap refcount bump and lets us hand the children to
-            // the recursive `&mut self` call without cloning the underlying `Vec`.
-            let sorted_children = if let Some(cached) = self.sorted_children_cache.get(&row_idx) {
-                Arc::clone(cached)
-            } else {
-                let mut children = provider.row_children(row_idx);
-                let sort_state = self.get_sort_state();
-                if let Some((sort_col, sort_up)) = sort_state {
-                    let _ = provider.sort_active_rows(&mut children, sort_col, sort_up);
+        let mut visited = RoaringBitmap::new();
+        let result = (|| {
+            while let Some(row) = stack.pop() {
+                if row >= provider.row_count() {
+                    return Err(TableError::CorruptedState);
                 }
-                let children = Arc::new(children);
-                self.sorted_children_cache
-                    .insert(row_idx, Arc::clone(&children));
-                children
-            };
-
-            for &child_idx in sorted_children.iter() {
-                self.flatten_tree_impl(provider, child_idx, out);
+                if !self.filter_matches.contains(row as u32) {
+                    continue;
+                }
+                if !visited.insert(row as u32) {
+                    return Err(TableError::CorruptedState);
+                }
+                active.push(row);
+                if !self.expanded_rows.contains(row as u32) {
+                    continue;
+                }
+                let children = if let Some(cached) = self.sorted_children_cache.get(&row) {
+                    Arc::clone(cached)
+                } else {
+                    let mut children = provider.row_children(row);
+                    if children.iter().any(|&child| child >= provider.row_count()) {
+                        return Err(TableError::CorruptedState);
+                    }
+                    if let Some((column, ascending)) = self.get_sort_state() {
+                        provider.sort_active_rows(&mut children, column, ascending)?;
+                    }
+                    let children = Arc::new(children);
+                    self.sorted_children_cache
+                        .insert(row, Arc::clone(&children));
+                    children
+                };
+                stack.extend(children.iter().rev().copied());
             }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.filter_cache_dirty = true;
+            self.sorted_children_cache.clear();
+        } else {
+            self.active_rows = active;
         }
+        result
     }
 }
 
@@ -724,5 +735,256 @@ mod tree_response_tests {
         state.expanded_rows.extend([0, 1, 3]);
         state.apply_new_sort(&Tree, 0).unwrap();
         assert_eq!(state.active_rows, [0, 3, 4, 1, 2]);
+    }
+
+    struct CyclicTree;
+    impl TableProvider for CyclicTree {
+        fn column_count(&self) -> usize {
+            1
+        }
+        fn header(&self, _col: usize) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed("Col"))
+        }
+        fn headers(&self) -> HeaderIter<'_> {
+            HeaderIter::new(self)
+        }
+        fn row_count(&self) -> usize {
+            3
+        }
+        fn cell_at(&self, _row: usize, _col: usize) -> Result<Option<TableCell<'_>>, TableError> {
+            Ok(Some((Cow::Borrowed("item"), None)))
+        }
+        fn for_all_rows(&self, _f: &mut RowCallback<'_>) -> Result<(), TableError> {
+            Ok(())
+        }
+        fn for_selected_rows(
+            &self,
+            _state: &TableState,
+            _f: &mut RowCallback<'_>,
+        ) -> Result<(), TableError> {
+            Ok(())
+        }
+        fn is_tree(&self) -> bool {
+            true
+        }
+        fn row_matches(
+            &self,
+            _state: &TableState,
+            _row: usize,
+            _filters: &[(usize, Filter)],
+            _highlight: Option<u8>,
+        ) -> bool {
+            true
+        }
+        fn row_parent(&self, row: usize) -> Option<usize> {
+            match row {
+                1 => Some(0),
+                0 => Some(1),
+                _ => None,
+            }
+        }
+        fn row_children(&self, row: usize) -> Vec<usize> {
+            match row {
+                0 => vec![1],
+                1 => vec![0], // Cycle back to 0!
+                _ => vec![],
+            }
+        }
+    }
+
+    #[test]
+    fn test_tree_cycle_detection_returns_corrupted_state() {
+        let mut state = TableState::new("cyclic", 3);
+        state.expanded_rows.extend([0, 1]);
+        let res = state.flatten_tree(&CyclicTree);
+        assert!(matches!(res, Err(TableError::CorruptedState)));
+        // Corrupted state should leave cache marked dirty and cleared
+        assert!(state.filter_cache_dirty);
+        assert!(state.sorted_children_cache.is_empty());
+    }
+
+    struct OutOfBoundsTree;
+    impl TableProvider for OutOfBoundsTree {
+        fn column_count(&self) -> usize {
+            1
+        }
+        fn header(&self, _col: usize) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed("Col"))
+        }
+        fn headers(&self) -> HeaderIter<'_> {
+            HeaderIter::new(self)
+        }
+        fn row_count(&self) -> usize {
+            2
+        }
+        fn cell_at(&self, _row: usize, _col: usize) -> Result<Option<TableCell<'_>>, TableError> {
+            Ok(Some((Cow::Borrowed("item"), None)))
+        }
+        fn for_all_rows(&self, _f: &mut RowCallback<'_>) -> Result<(), TableError> {
+            Ok(())
+        }
+        fn for_selected_rows(
+            &self,
+            _state: &TableState,
+            _f: &mut RowCallback<'_>,
+        ) -> Result<(), TableError> {
+            Ok(())
+        }
+        fn is_tree(&self) -> bool {
+            true
+        }
+        fn row_matches(
+            &self,
+            _state: &TableState,
+            _row: usize,
+            _filters: &[(usize, Filter)],
+            _highlight: Option<u8>,
+        ) -> bool {
+            true
+        }
+        fn row_parent(&self, _row: usize) -> Option<usize> {
+            None
+        }
+        fn row_children(&self, row: usize) -> Vec<usize> {
+            if row == 0 {
+                vec![99] // 99 >= row_count (2)
+            } else {
+                vec![]
+            }
+        }
+    }
+
+    #[test]
+    fn test_tree_out_of_bounds_child_returns_corrupted_state() {
+        let mut state = TableState::new("oob", 2);
+        state.expanded_rows.insert(0);
+        let res = state.flatten_tree(&OutOfBoundsTree);
+        assert!(matches!(res, Err(TableError::CorruptedState)));
+    }
+
+    #[test]
+    fn test_refresh_view_clears_dirty_cache_for_trees() {
+        let mut state = TableState::new("tree", 5);
+        state.expanded_rows.extend([0, 1, 3]);
+        assert!(state.filter_cache_dirty);
+
+        let did_refresh = state.refresh_view(&Tree).unwrap();
+        assert!(did_refresh);
+        assert!(!state.filter_cache_dirty);
+        assert_eq!(state.active_rows, [0, 1, 2, 3, 4]);
+
+        // Subsequent frame: dirty flag is false, so refresh_view is a zero-work O(1) no-op
+        let did_refresh_again = state.refresh_view(&Tree).unwrap();
+        assert!(!did_refresh_again);
+    }
+
+    #[test]
+    fn test_show_tree_expander_arrow_sizing_pass_ignored() {
+        let mut state = TableState::new("tree", 5);
+        state.filter_cache_dirty = false;
+        let hierarchy = RowHierarchy {
+            indent_level: 1,
+            has_children: true,
+            is_expanded: false,
+        };
+
+        let make_input = |pos: egui::Pos2, pressed: bool, time: f64| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(500.0, 350.0),
+            )),
+            time: Some(time),
+            events: vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    pressed,
+                    button: egui::PointerButton::Primary,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        let arrow_pos = egui::pos2(7.0, 29.0);
+
+        // Pass 1: Sizing pass - click must be ignored even when clicked
+        let ctx1 = egui::Context::default();
+        let mut out = ctx1.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(500.0, 350.0),
+                )),
+                time: Some(0.0),
+                events: vec![egui::Event::PointerMoved(arrow_pos)],
+                ..Default::default()
+            },
+            |ui| {
+                let mut sizing_ui = ui.new_child(egui::UiBuilder::new().sizing_pass());
+                let _ = state.show_tree_cell(&mut sizing_ui, 0, hierarchy);
+            },
+        );
+        out.textures_delta.clear();
+
+        let mut out = ctx1.run_ui(make_input(arrow_pos, true, 1.0), |ui| {
+            let mut sizing_ui = ui.new_child(egui::UiBuilder::new().sizing_pass());
+            let _ = state.show_tree_cell(&mut sizing_ui, 0, hierarchy);
+        });
+        out.textures_delta.clear();
+
+        let mut out = ctx1.run_ui(make_input(arrow_pos, false, 1.05), |ui| {
+            let mut sizing_ui = ui.new_child(egui::UiBuilder::new().sizing_pass());
+            let changed = state.show_tree_cell(&mut sizing_ui, 0, hierarchy);
+            assert!(!changed, "Sizing pass must never toggle expansion");
+            assert!(!state.expanded_rows.contains(0));
+            assert!(!state.filter_cache_dirty);
+        });
+        out.textures_delta.clear();
+
+        // Pass 2: Normal pass with click
+        let ctx2 = egui::Context::default();
+        // Frame 0: layout pass so widget bounds are registered
+        let mut out = ctx2.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(500.0, 350.0),
+                )),
+                time: Some(0.0),
+                events: vec![egui::Event::PointerMoved(arrow_pos)],
+                ..Default::default()
+            },
+            |ui| {
+                let _ = state.show_tree_cell(ui, 0, hierarchy);
+            },
+        );
+        out.textures_delta.clear();
+
+        // Frame 1: Pointer press
+        let mut out = ctx2.run_ui(make_input(arrow_pos, true, 1.0), |ui| {
+            let _ = state.show_tree_cell(ui, 0, hierarchy);
+        });
+        out.textures_delta.clear();
+
+        // Frame 2: Pointer release -> click
+        let mut out = ctx2.run_ui(make_input(arrow_pos, false, 1.05), |ui| {
+            let changed = state.show_tree_cell(ui, 0, hierarchy);
+            assert!(changed, "Normal pass must process click");
+            assert!(state.expanded_rows.contains(0));
+            assert!(state.filter_cache_dirty);
+
+            // Attempt duplicate activation in same frame
+            let hierarchy_expanded = RowHierarchy {
+                indent_level: 1,
+                has_children: true,
+                is_expanded: true,
+            };
+            let changed_dup = state.show_tree_cell(ui, 0, hierarchy_expanded);
+            assert!(
+                !changed_dup,
+                "Second activation in same frame must be de-duplicated"
+            );
+        });
+        out.textures_delta.clear();
     }
 }
