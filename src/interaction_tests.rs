@@ -495,3 +495,96 @@ fn test_handle_row_selection_at_visible_legacy_mode() {
     assert!(state.selected_rows.is_empty());
     assert_eq!(state.last_clicked_visible_index, None);
 }
+
+#[test]
+fn test_header_cell_ui_call_count_with_sticky_cols() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::delegate::TableKitDelegate;
+    use crate::layout::{Column, HeaderRow, Table};
+
+    let ctx = egui::Context::default();
+    let data = Data::default();
+    let mut state = TableState::new("test", 4);
+    let col0_calls = AtomicUsize::new(0);
+    let col1_calls = AtomicUsize::new(0);
+
+    let mut output = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                egui::vec2(500.0, 350.0),
+            )),
+            ..Default::default()
+        },
+        |ui| {
+            let mut collected = Vec::new();
+            let mut halt_error = None;
+            let mut item_clicked = None;
+            let mut secondary_clicked = None;
+            let org_colors = [];
+            let user_colors = [];
+
+            let table = Table::new()
+                .num_sticky_cols(1)
+                .num_rows(4)
+                .columns(vec![
+                    Column::new(85.0),
+                    Column::new(140.0),
+                    Column::new(140.0),
+                ])
+                .headers([HeaderRow::new(24.0)]);
+
+            struct CountingDelegate<'a> {
+                inner: TableKitDelegate<'a>,
+                c0: &'a AtomicUsize,
+                c1: &'a AtomicUsize,
+            }
+
+            impl crate::layout::TableDelegate for CountingDelegate<'_> {
+                fn header_cell_ui(
+                    &mut self,
+                    ui: &mut egui::Ui,
+                    cell: &crate::layout::HeaderCellInfo,
+                ) {
+                    if cell.col_range.start == 0 {
+                        self.c0.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if cell.col_range.start == 1 {
+                        self.c1.fetch_add(1, Ordering::SeqCst);
+                    }
+                    self.inner.header_cell_ui(ui, cell);
+                }
+
+                fn cell_ui(&mut self, ui: &mut egui::Ui, cell: &crate::layout::CellInfo) {
+                    self.inner.cell_ui(ui, cell);
+                }
+            }
+
+            let delegate = TableKitDelegate::new(
+                &data,
+                &mut state,
+                &org_colors,
+                &user_colors,
+                &mut collected,
+                &mut halt_error,
+                None,
+                &mut item_clicked,
+                &mut secondary_clicked,
+            );
+            let mut counting = CountingDelegate {
+                inner: delegate,
+                c0: &col0_calls,
+                c1: &col1_calls,
+            };
+
+            table.show(ui, &mut counting);
+            drop(counting);
+            let _ = state.process_responses(&data, collected);
+        },
+    );
+    output.textures_delta.clear();
+
+    assert_eq!(col0_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(col1_calls.load(Ordering::SeqCst), 1);
+}

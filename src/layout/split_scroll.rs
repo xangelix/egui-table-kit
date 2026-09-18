@@ -112,7 +112,7 @@ impl SplitScroll {
             }
             .to_vec2();
 
-            {
+            if fixed_size.x > 0.0 {
                 // LEFT TOP: Fixed
                 let stroke_width = ui.visuals().widgets.noninteractive.bg_stroke.width.max(1.0);
                 let left_top_rect = rect
@@ -138,7 +138,7 @@ impl SplitScroll {
                 delegate.right_top_ui(&mut right_top_ui, scroll_offset);
             }
 
-            {
+            if fixed_size.x > 0.0 {
                 // LEFT BOTTOM: Vertically scrollable
                 let left_bottom_outer_rect = rect
                     .with_max_x(rect.left() + fixed_size.x)

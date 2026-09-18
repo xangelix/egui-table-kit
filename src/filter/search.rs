@@ -186,6 +186,8 @@ impl<'a> SearchBar<'a> {
                 let text_changed = search.edit_text(|s| {
                     ui.add(
                         egui::TextEdit::singleline(s)
+                            .id_salt("search_query_input")
+                            .lock_focus(true)
                             .clip_text(true)
                             .hint_text("Search..."),
                     )

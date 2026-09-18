@@ -697,7 +697,16 @@ impl TableSplitScrollDelegate<'_> {
             .get_row_nr_at_y_offset(&self.egui_ctx, self.id, self.table_delegate, y_offset)
     }
 
-    fn header_ui(&mut self, ui: &mut Ui, scroll_offset: Vec2) {
+    fn header_ui(
+        &mut self,
+        ui: &mut Ui,
+        scroll_offset: Vec2,
+        quadrant_cols: std::ops::Range<usize>,
+    ) {
+        if quadrant_cols.is_empty() {
+            return;
+        }
+
         // Compute the visible column range for the current quadrant viewport
         let viewport = ui.clip_rect().translate(scroll_offset);
 
@@ -705,8 +714,8 @@ impl TableSplitScrollDelegate<'_> {
         let col_range = if self.table.columns.is_empty() || viewport.left() == viewport.right() {
             0..0
         } else if self.do_full_sizing_pass {
-            // Render all columns during a sizing pass to measure layout constraints
-            0..self.table.columns.len()
+            // Render all columns belonging to this quadrant during a sizing pass
+            quadrant_cols
         } else {
             let col_idx_at = |x: f32| -> usize {
                 self.col_x
@@ -715,7 +724,9 @@ impl TableSplitScrollDelegate<'_> {
                     .at_most(self.table.columns.len() - 1)
             };
 
-            col_idx_at(viewport.min.x)..col_idx_at(viewport.max.x) + 1
+            let start = col_idx_at(viewport.min.x).max(quadrant_cols.start);
+            let end = (col_idx_at(viewport.max.x) + 1).min(quadrant_cols.end);
+            start..end.max(start)
         };
 
         let last_header_row_y = self.header_row_y.last().copied().unwrap_or(0.0);
@@ -904,7 +915,17 @@ impl TableSplitScrollDelegate<'_> {
         }
     }
 
-    fn region_ui(&mut self, ui: &mut Ui, scroll_offset: Vec2, do_prefetch: bool) {
+    fn region_ui(
+        &mut self,
+        ui: &mut Ui,
+        scroll_offset: Vec2,
+        quadrant_cols: std::ops::Range<usize>,
+        do_prefetch: bool,
+    ) {
+        if quadrant_cols.is_empty() {
+            return;
+        }
+
         // Used to find the visible range of columns and rows:
         let viewport = ui.clip_rect().translate(scroll_offset);
         let last_header_row_y = self.header_row_y.last().copied().unwrap_or(0.0);
@@ -914,7 +935,7 @@ impl TableSplitScrollDelegate<'_> {
             0..0
         } else if self.do_full_sizing_pass {
             // We do the UI for all columns during a sizing pass, so we can auto-size ALL columns
-            0..self.table.columns.len()
+            quadrant_cols
         } else {
             // Only paint the visible columns:
             let col_idx_at = |x: f32| -> usize {
@@ -924,7 +945,9 @@ impl TableSplitScrollDelegate<'_> {
                     .at_most(self.table.columns.len() - 1)
             };
 
-            col_idx_at(viewport.min.x)..col_idx_at(viewport.max.x) + 1
+            let start = col_idx_at(viewport.min.x).max(quadrant_cols.start);
+            let end = (col_idx_at(viewport.max.x) + 1).min(quadrant_cols.end);
+            start..end.max(start)
         };
 
         #[allow(clippy::float_cmp)]
@@ -1078,12 +1101,14 @@ impl TableSplitScrollDelegate<'_> {
 
 impl SplitScrollDelegate for TableSplitScrollDelegate<'_> {
     fn left_top_ui(&mut self, ui: &mut Ui) {
-        self.header_ui(ui, Vec2::ZERO);
+        let sticky_cols = 0..self.table.num_sticky_cols;
+        self.header_ui(ui, Vec2::ZERO, sticky_cols);
     }
 
     fn right_top_ui(&mut self, ui: &mut Ui, scroll_offset: Vec2) {
         let horizontal_scroll_offset = vec2(scroll_offset.x, 0.0);
-        self.header_ui(ui, horizontal_scroll_offset);
+        let scrollable_cols = self.table.num_sticky_cols..self.table.columns.len();
+        self.header_ui(ui, horizontal_scroll_offset, scrollable_cols);
     }
 
     fn right_bottom_ui(&mut self, ui: &mut Ui, scroll_offset: Vec2) {
@@ -1129,12 +1154,14 @@ impl SplitScrollDelegate for TableSplitScrollDelegate<'_> {
         }
 
         self.state.scroll_offset = Some(scroll_offset);
-        self.region_ui(ui, scroll_offset, true);
+        let scrollable_cols = self.table.num_sticky_cols..self.table.columns.len();
+        self.region_ui(ui, scroll_offset, scrollable_cols, true);
     }
 
     fn left_bottom_ui(&mut self, ui: &mut Ui, scroll_offset: Vec2) {
         let vertical_scroll_offset = vec2(0.0, scroll_offset.y);
-        self.region_ui(ui, vertical_scroll_offset, false);
+        let sticky_cols = 0..self.table.num_sticky_cols;
+        self.region_ui(ui, vertical_scroll_offset, sticky_cols, false);
     }
 
     fn paint_overlays(&mut self, ui: &mut Ui) {
