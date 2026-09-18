@@ -324,4 +324,75 @@ mod tests {
         // Visual col 1 -> provider col 0
         assert_eq!(visited_cols, vec![1, 0]);
     }
+
+    struct FailingCellProvider;
+
+    impl TableProvider for FailingCellProvider {
+        fn column_count(&self) -> usize {
+            2
+        }
+        fn header(&self, index: usize) -> Option<Cow<'_, str>> {
+            ["A", "B"].get(index).map(|s| Cow::Borrowed(*s))
+        }
+        fn headers(&self) -> HeaderIter<'_> {
+            HeaderIter::new(self)
+        }
+        fn row_count(&self) -> usize {
+            2
+        }
+        fn cell_at(&self, _row: usize, _col: usize) -> Result<Option<TableCell<'_>>, TableError> {
+            Err(TableError::CorruptedState)
+        }
+        fn for_all_rows(&self, f: &mut RowCallback<'_>) -> Result<(), TableError> {
+            for row_index in 0..self.row_count() {
+                f(&BorrowedRow {
+                    provider: self,
+                    row_index,
+                })?;
+            }
+            Ok(())
+        }
+        fn for_selected_rows(
+            &self,
+            _state: &TableState,
+            _f: &mut RowCallback<'_>,
+        ) -> Result<(), TableError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_fallible_cell_error_propagates_to_show() {
+        let provider = FailingCellProvider;
+        let mut state = TableState::new("test", 1);
+        let ctx = egui::Context::default();
+
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let res =
+                TableKit::new("fail_table", &provider, &mut state).show(ui, |_, _, _, _| None);
+            assert!(matches!(res, Err(TableError::CorruptedState)));
+        });
+        full_output.textures_delta.clear();
+    }
+
+    #[test]
+    fn test_custom_cell_renderer_does_not_suppress_provider_errors() {
+        let provider = FailingCellProvider;
+        let mut state = TableState::new("test", 1);
+        let ctx = egui::Context::default();
+
+        let mut custom_called = false;
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let res = TableKit::new("fail_custom_table", &provider, &mut state).show(
+                ui,
+                |ui, _cell, _row, _color| {
+                    custom_called = true;
+                    Some(ui.label("Custom cell"))
+                },
+            );
+            assert!(matches!(res, Err(TableError::CorruptedState)));
+        });
+        full_output.textures_delta.clear();
+        assert!(!custom_called);
+    }
 }

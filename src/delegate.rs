@@ -319,6 +319,13 @@ impl TableDelegate for TableKitDelegate<'_> {
             provider: self.provider,
             row_index: row_idx,
         };
+        let value = match borrowed_row.try_cell(cell.col_nr) {
+            Ok(value) => value,
+            Err(error) => {
+                *self.halt_error = Some(error);
+                return;
+            }
+        };
 
         let mut rendered = false;
 
@@ -340,7 +347,7 @@ impl TableDelegate for TableKitDelegate<'_> {
                     rendered = true;
                 }
 
-                if !rendered && let Some((val, _)) = borrowed_row.cell(cell.col_nr) {
+                if !rendered && let Some((val, _)) = &value {
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::Label::new(egui::RichText::new(val.as_ref()).color(text_color))

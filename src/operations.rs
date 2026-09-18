@@ -40,6 +40,10 @@ impl Row for OwnedRow {
 /// A row element that resolves display text properties at specific column offsets.
 pub trait Row {
     fn cell(&self, col_index: usize) -> Option<TableCell<'_>>;
+    /// Fallible access for renderers that must propagate provider failures.
+    fn try_cell(&self, col_index: usize) -> Result<Option<TableCell<'_>>, TableError> {
+        Ok(self.cell(col_index))
+    }
     fn column_count(&self) -> usize;
 
     /// Returns the physical index of this row within the provider, if available.
@@ -139,6 +143,10 @@ pub struct BorrowedRow<'a> {
 }
 
 impl Row for BorrowedRow<'_> {
+    fn try_cell(&self, col_index: usize) -> Result<Option<TableCell<'_>>, TableError> {
+        self.provider.cell_at(self.row_index, col_index)
+    }
+
     fn cell(&self, col_index: usize) -> Option<TableCell<'_>> {
         self.provider
             .cell_at(self.row_index, col_index)
@@ -157,6 +165,16 @@ impl Row for BorrowedRow<'_> {
 
 /// Trait implemented by datasets to back the interactive table system.
 pub trait TableProvider {
+    /// Stable identity within this table. Override when physical row indices can change.
+    /// Keys must be unique and must not be reused for a different logical row.
+    fn row_key(&self, row_index: usize) -> egui::Id {
+        egui::Id::new(row_index)
+    }
+
+    fn row_selectable(&self, _row_index: usize) -> bool {
+        true
+    }
+
     fn column_count(&self) -> usize;
     fn header(&self, index: usize) -> Option<Cow<'_, str>>;
 
@@ -648,6 +666,10 @@ impl TableOperations {
 
     /// Renders a single operation directly at a specific group and operation index.
     /// Gives the caller total control over fine-grained placement and visual arrangement.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve the public single-operation renderer signature for existing callers"
+    )]
     pub fn show_operation<F>(
         &mut self,
         ui: &mut egui::Ui,
@@ -1097,5 +1119,103 @@ impl TableOperation for DeSelectAll {
     fn exec(&mut self, ctx: &mut OperationContext<'_, '_>) -> Result<(), TableError> {
         ctx.data.selected_rows.clear();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummyProvider {
+        fail: bool,
+    }
+
+    impl TableProvider for DummyProvider {
+        fn column_count(&self) -> usize {
+            2
+        }
+        fn header(&self, _index: usize) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed("Col"))
+        }
+        fn headers(&self) -> HeaderIter<'_> {
+            HeaderIter::new(self)
+        }
+        fn row_count(&self) -> usize {
+            1
+        }
+        fn cell_at(&self, _row: usize, _col: usize) -> Result<Option<TableCell<'_>>, TableError> {
+            if self.fail {
+                Err(TableError::CorruptedState)
+            } else {
+                Ok(Some((Cow::Borrowed("val"), None)))
+            }
+        }
+        fn for_all_rows(&self, _f: &mut RowCallback<'_>) -> Result<(), TableError> {
+            Ok(())
+        }
+        fn for_selected_rows(
+            &self,
+            _state: &TableState,
+            _f: &mut RowCallback<'_>,
+        ) -> Result<(), TableError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_owned_row_try_cell() {
+        let row = OwnedRow {
+            cells: vec![
+                (compact_str::CompactString::new("alpha"), None),
+                (compact_str::CompactString::new("beta"), None),
+            ],
+        };
+        assert_eq!(
+            row.try_cell(0).unwrap().map(|(val, _)| val),
+            Some(Cow::Borrowed("alpha"))
+        );
+        assert_eq!(
+            row.try_cell(1).unwrap().map(|(val, _)| val),
+            Some(Cow::Borrowed("beta"))
+        );
+        assert!(row.try_cell(2).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_borrowed_row_try_cell_and_compatibility() {
+        let ok_provider = DummyProvider { fail: false };
+        let ok_row = BorrowedRow {
+            provider: &ok_provider,
+            row_index: 0,
+        };
+        assert_eq!(
+            ok_row.try_cell(0).unwrap().map(|(val, _)| val),
+            Some(Cow::Borrowed("val"))
+        );
+        assert_eq!(
+            ok_row.cell(0).map(|(val, _)| val),
+            Some(Cow::Borrowed("val"))
+        );
+
+        let err_provider = DummyProvider { fail: true };
+        let err_row = BorrowedRow {
+            provider: &err_provider,
+            row_index: 0,
+        };
+        assert!(matches!(
+            err_row.try_cell(0),
+            Err(TableError::CorruptedState)
+        ));
+        // Backwards compatibility: cell() suppresses error to None
+        assert!(err_row.cell(0).is_none());
+    }
+
+    #[test]
+    fn test_table_provider_default_keys_and_selectable() {
+        let provider = DummyProvider { fail: false };
+        assert_eq!(provider.row_key(0), egui::Id::new(0usize));
+        assert_eq!(provider.row_key(42), egui::Id::new(42usize));
+        assert!(provider.row_selectable(0));
+        assert!(provider.row_selectable(99));
     }
 }
