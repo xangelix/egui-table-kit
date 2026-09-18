@@ -16,6 +16,9 @@ categories = [
 ]
 keywords = ["egui", "table", "tree", "filter", "sort"]
 
+[features]
+simd = ["roaring/simd"]
+
 [dependencies]
 ahash = "0.8"
 bitflags = { version = "2", features = ["serde"] }
@@ -24,7 +27,7 @@ egui = { version = "0.36", features = ["serde"] }
 fluent-zero = "0.1"
 parking_lot = { version = "0.12", features = ["hardware-lock-elision"] }
 regex = "1"
-roaring = { version = "0.11", features = ["serde", "simd"] }
+roaring = { version = "0.11", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
