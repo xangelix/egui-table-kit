@@ -593,6 +593,15 @@ impl Table {
                             self.max_height.unwrap_or_else(|| ui.clip_rect().height())
                         };
 
+                        // An explicit row/pixel limit is a hard bound: the floor must not push
+                        // the table (and its scrollbar) past the region the caller sized it for.
+                        let min_table_height =
+                            if self.max_rows.is_some() || self.max_height.is_some() {
+                                min_table_height.min(max_height_limit)
+                            } else {
+                                min_table_height
+                            };
+
                         let available_height = ui
                             .available_height()
                             .at_most(max_height_limit)

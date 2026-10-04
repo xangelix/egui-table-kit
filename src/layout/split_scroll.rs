@@ -87,8 +87,12 @@ impl SplitScroll {
             let scroll_offset = {
                 let mut scroll_ui = ui.new_child(UiBuilder::new().max_rect(rect));
 
+                // `rect` is already the exact size the table chose; egui's default 64px
+                // `min_scrolled_size` would otherwise inflate a short table past it.
                 egui::ScrollArea::new(scroll_enabled)
                     .auto_shrink(false)
+                    .min_scrolled_width(0.0)
+                    .min_scrolled_height(0.0)
                     .scroll_bar_rect(bottom_right_rect)
                     .stick_to_bottom(stick_to_bottom)
                     .show_viewport(&mut scroll_ui, |ui, scroll_offset_rect| {
