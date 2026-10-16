@@ -38,6 +38,11 @@ pub struct SplitScroll {
 
     /// If true, the vertical scrollbar will stick to the bottom as the content grows.
     pub stick_to_bottom: bool,
+
+    /// Multiplies mouse-wheel scrolling (`Vec2::splat(1.0)` for egui's own speed). A table taller
+    /// than egui can scroll precisely maps a shorter scroll range onto its rows and slows the
+    /// wheel by the same ratio, so the rows still move at the usual speed.
+    pub wheel_scroll_multiplier: Vec2,
 }
 
 /// The contents of a [`SplitScroll`].
@@ -68,6 +73,7 @@ impl SplitScroll {
             scroll_outer_size,
             scroll_content_size,
             stick_to_bottom,
+            wheel_scroll_multiplier,
         } = self;
 
         ui.scope(|ui| {
@@ -95,6 +101,7 @@ impl SplitScroll {
                     .min_scrolled_height(0.0)
                     .scroll_bar_rect(bottom_right_rect)
                     .stick_to_bottom(stick_to_bottom)
+                    .wheel_scroll_multiplier(wheel_scroll_multiplier)
                     .show_viewport(&mut scroll_ui, |ui, scroll_offset_rect| {
                         ui.set_min_size(fixed_size + scroll_content_size);
                         let scroll_offset = scroll_offset_rect.min.to_vec2();
@@ -208,6 +215,7 @@ mod tests {
                 scroll_outer_size: vec2(200.0, 200.0),
                 scroll_content_size: vec2(400.0, 400.0),
                 stick_to_bottom: false,
+                wheel_scroll_multiplier: Vec2::splat(1.0),
             };
             split_scroll.show(ui, &mut delegate);
             // paint_overlays should only be called once (for bottom-right scroll area), NOT for left
@@ -229,6 +237,7 @@ mod tests {
                 scroll_outer_size: vec2(200.0, 200.0),
                 scroll_content_size: vec2(400.0, 400.0),
                 stick_to_bottom: false,
+                wheel_scroll_multiplier: Vec2::splat(1.0),
             };
             split_scroll.show(ui, &mut delegate);
             // paint_overlays should be called twice: once for bottom-right and once for left sticky

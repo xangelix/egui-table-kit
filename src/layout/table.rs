@@ -408,25 +408,12 @@ impl Table {
         table_delegate.row_top_offset(ctx, table_id, row_nr)
     }
 
-    /// Which row contains the given y offset (from the top)?
-    fn get_row_nr_at_y_offset(
-        &self,
-        ctx: &Context,
-        table_id: Id,
-        table_delegate: &dyn TableDelegate,
-        y_offset: f32,
-    ) -> u64 {
-        if let Some(height) = table_delegate.uniform_row_height()
-            && height > 0.0
-        {
-            return ((y_offset / height) as u64).at_most(self.num_rows.saturating_sub(1));
+    /// The height of all rows, exactly for uniform rows.
+    fn rows_height(&self, ctx: &Context, table_id: Id, table_delegate: &dyn TableDelegate) -> f64 {
+        match table_delegate.uniform_row_height() {
+            Some(height) if height > 0.0 => self.num_rows as f64 * f64::from(height),
+            _ => f64::from(self.get_row_top_offset(ctx, table_id, table_delegate, self.num_rows)),
         }
-
-        // Fall back to binary search for variable heights
-        partition_point(0..=self.num_rows, |row_nr| {
-            y_offset <= self.get_row_top_offset(ctx, table_id, table_delegate, row_nr)
-        })
-        .saturating_sub(1)
     }
 
     pub fn show(mut self, ui: &mut Ui, table_delegate: &mut dyn TableDelegate) -> Response {
@@ -568,60 +555,66 @@ impl Table {
                     }
                 }
 
+                let scroll_outer_size = {
+                    // Calculate the combined height of the headers and rows
+                    let total_rows_height =
+                        self.get_row_top_offset(ui, id, table_delegate, self.num_rows);
+                    let total_content_height = sticky_size.y + total_rows_height;
+
+                    // Ensure a minimum height of up to 10 rows (or self.num_rows if smaller)
+                    // to prevent collapsing to header-only height during animations/sizing passes.
+                    let min_rows = self.num_rows.min(10);
+                    let min_rows_height = self.get_row_top_offset(ui, id, table_delegate, min_rows);
+                    let min_table_height = sticky_size.y + min_rows_height;
+
+                    // Calculate the maximum allowed height based on row limits, max pixel limits, or the visible clip rect.
+                    let max_height_limit = if let Some(max_r) = self.max_rows {
+                        let max_rows_height =
+                            self.get_row_top_offset(ui, id, table_delegate, max_r);
+                        sticky_size.y + max_rows_height
+                    } else {
+                        self.max_height.unwrap_or_else(|| ui.clip_rect().height())
+                    };
+
+                    // An explicit row/pixel limit is a hard bound: the floor must not push
+                    // the table (and its scrollbar) past the region the caller sized it for.
+                    let min_table_height = if self.max_rows.is_some() || self.max_height.is_some() {
+                        min_table_height.min(max_height_limit)
+                    } else {
+                        min_table_height
+                    };
+
+                    let available_height = ui
+                        .available_height()
+                        .at_most(max_height_limit)
+                        .max(min_table_height);
+
+                    let allocated_height = total_content_height.min(available_height);
+
+                    Vec2::new(
+                        (ui.available_width() - sticky_size.x).max(0.0),
+                        (allocated_height - sticky_size.y).max(0.0),
+                    )
+                };
+                let vertical = VerticalMap::new(
+                    self.rows_height(ui, id, table_delegate),
+                    scroll_outer_size.y,
+                    table_delegate.uniform_row_height(),
+                );
+
                 SplitScroll {
                     scroll_enabled: Vec2b::new(true, true),
                     fixed_size: sticky_size,
-                    scroll_outer_size: {
-                        // Calculate the combined height of the headers and rows
-                        let total_rows_height =
-                            self.get_row_top_offset(ui, id, table_delegate, self.num_rows);
-                        let total_content_height = sticky_size.y + total_rows_height;
-
-                        // Ensure a minimum height of up to 10 rows (or self.num_rows if smaller)
-                        // to prevent collapsing to header-only height during animations/sizing passes.
-                        let min_rows = self.num_rows.min(10);
-                        let min_rows_height =
-                            self.get_row_top_offset(ui, id, table_delegate, min_rows);
-                        let min_table_height = sticky_size.y + min_rows_height;
-
-                        // Calculate the maximum allowed height based on row limits, max pixel limits, or the visible clip rect.
-                        let max_height_limit = if let Some(max_r) = self.max_rows {
-                            let max_rows_height =
-                                self.get_row_top_offset(ui, id, table_delegate, max_r);
-                            sticky_size.y + max_rows_height
-                        } else {
-                            self.max_height.unwrap_or_else(|| ui.clip_rect().height())
-                        };
-
-                        // An explicit row/pixel limit is a hard bound: the floor must not push
-                        // the table (and its scrollbar) past the region the caller sized it for.
-                        let min_table_height =
-                            if self.max_rows.is_some() || self.max_height.is_some() {
-                                min_table_height.min(max_height_limit)
-                            } else {
-                                min_table_height
-                            };
-
-                        let available_height = ui
-                            .available_height()
-                            .at_most(max_height_limit)
-                            .max(min_table_height);
-
-                        let allocated_height = total_content_height.min(available_height);
-
-                        Vec2::new(
-                            (ui.available_width() - sticky_size.x).max(0.0),
-                            (allocated_height - sticky_size.y).max(0.0),
-                        )
-                    },
+                    scroll_outer_size,
                     scroll_content_size: Vec2::new(
                         self.columns[self.num_sticky_cols..]
                             .iter()
                             .map(|c| c.current)
                             .sum(),
-                        self.get_row_top_offset(ui, id, table_delegate, self.num_rows),
+                        vertical.scroll_height,
                     ),
                     stick_to_bottom: self.stick_to_bottom,
+                    wheel_scroll_multiplier: vec2(1.0, vertical.wheel_factor()),
                 }
                 .show(
                     ui,
@@ -638,6 +631,7 @@ impl Table {
                         has_prefetched: false,
                         egui_ctx: ui.ctx().clone(),
                         dragging_col: None,
+                        vertical,
                     },
                 );
             })
@@ -645,6 +639,103 @@ impl Table {
 
         state.store(ui, id);
         response
+    }
+}
+
+/// How the rows' height maps onto the scroll area.
+///
+/// egui scrolls with `f32` offsets, which stop addressing every point past 2^24 (16.7M points:
+/// under a million rows of 20 points) and lose precision much earlier once an offset is
+/// subtracted from a position as large. A taller table with a uniform row height is given a
+/// scroll range of at most [`Self::MAX_SCROLL_HEIGHT`] instead: the scroll offset maps
+/// proportionally onto the rows (in `f64`), and rows are placed relative to the viewport, so
+/// every row lands on an exact point however far down it is, and the last row ends exactly at the
+/// bottom. The mouse wheel is slowed by the same ratio, so the rows move at the usual speed.
+///
+/// The scroll offset itself is still an `f32`: it addresses the rows to within
+/// `rows_height × 2⁻²³` points (2.4 for a million rows of 20), so a row scrolled to may land that
+/// far from where it was aimed. Rows never drift apart or overlap.
+///
+/// A table with variable row heights is mapped one to one, as before.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct VerticalMap {
+    /// The height of all rows.
+    rows_height: f64,
+    /// The height of the region the rows scroll in.
+    viewport: f64,
+    /// The height the scroll area is given.
+    scroll_height: f32,
+    /// The uniform row height, if the rows have one.
+    row_height: Option<f64>,
+    /// Whether the scroll range is shorter than the rows.
+    scaled: bool,
+}
+
+impl VerticalMap {
+    /// The tallest scroll range: 2^22 points, where an `f32` offset is exact to a quarter point.
+    const MAX_SCROLL_HEIGHT: f32 = 4_194_304.0;
+
+    fn new(rows_height: f64, viewport: f32, uniform_row_height: Option<f32>) -> Self {
+        let row_height = uniform_row_height
+            .filter(|height| *height > 0.0)
+            .map(f64::from);
+        let scaled = row_height.is_some() && rows_height > f64::from(Self::MAX_SCROLL_HEIGHT);
+        Self {
+            rows_height,
+            viewport: f64::from(viewport.max(0.0)),
+            scroll_height: if scaled {
+                Self::MAX_SCROLL_HEIGHT
+            } else {
+                rows_height as f32
+            },
+            row_height,
+            scaled,
+        }
+    }
+
+    /// How far the scroll offset can go.
+    fn scroll_range(&self) -> f64 {
+        (f64::from(self.scroll_height) - self.viewport).max(0.0)
+    }
+
+    /// How far the rows can scroll.
+    fn content_range(&self) -> f64 {
+        (self.rows_height - self.viewport).max(0.0)
+    }
+
+    /// Where the rows are at the viewport's top for the scroll offset `scroll`.
+    fn content_offset(&self, scroll: f32) -> f64 {
+        let scroll = f64::from(scroll);
+        if !self.scaled {
+            return scroll;
+        }
+        let range = self.scroll_range();
+        if range <= 0.0 {
+            return 0.0;
+        }
+        (scroll / range * self.content_range()).clamp(0.0, self.content_range())
+    }
+
+    /// The scroll offset that puts the rows' `content` offset at the viewport's top.
+    fn scroll_offset(&self, content: f64) -> f32 {
+        if !self.scaled {
+            return content as f32;
+        }
+        let range = self.content_range();
+        if range <= 0.0 {
+            return 0.0;
+        }
+        (content.clamp(0.0, range) / range * self.scroll_range()) as f32
+    }
+
+    /// How much the mouse wheel is slowed: scroll range over rows' range.
+    fn wheel_factor(&self) -> f32 {
+        let content = self.content_range();
+        if self.scaled && content > 0.0 {
+            (self.scroll_range() / content) as f32
+        } else {
+            1.0
+        }
     }
 }
 
@@ -691,6 +782,9 @@ struct TableSplitScrollDelegate<'a> {
     egui_ctx: Context,
 
     dragging_col: Option<usize>,
+
+    /// How the rows map onto the scroll area.
+    vertical: VerticalMap,
 }
 
 impl TableSplitScrollDelegate<'_> {
@@ -700,10 +794,26 @@ impl TableSplitScrollDelegate<'_> {
             .get_row_top_offset(&self.egui_ctx, self.id, self.table_delegate, row_nr)
     }
 
-    /// Helper wrapper around [`Table::get_row_nr_at_y_offset`].
-    fn get_row_nr_at_y_offset(&self, y_offset: f32) -> u64 {
-        self.table
-            .get_row_nr_at_y_offset(&self.egui_ctx, self.id, self.table_delegate, y_offset)
+    /// The top of `row_nr` below the first row, exactly for uniform rows.
+    fn row_top(&self, row_nr: u64) -> f64 {
+        match self.vertical.row_height {
+            Some(height) => row_nr as f64 * height,
+            None => f64::from(self.get_row_top_offset(row_nr)),
+        }
+    }
+
+    /// Which row contains the given offset below the first row?
+    fn row_at(&self, offset: f64) -> u64 {
+        let last = self.table.num_rows.saturating_sub(1);
+        if let Some(height) = self.vertical.row_height {
+            return ((offset / height).max(0.0) as u64).at_most(last);
+        }
+        // Variable heights: binary search.
+        let offset = offset as f32;
+        partition_point(0..=self.table.num_rows, |row_nr| {
+            offset <= self.get_row_top_offset(row_nr)
+        })
+        .saturating_sub(1)
     }
 
     fn header_ui(
@@ -959,6 +1069,12 @@ impl TableSplitScrollDelegate<'_> {
             start..end.max(start)
         };
 
+        // Where the rows are at the top of the viewport: exact however far down (see `VerticalMap`).
+        let content_top = self.vertical.content_offset(scroll_offset.y);
+        let clip = ui.clip_rect();
+        let rows_top = content_top + f64::from(clip.top() - last_header_row_y);
+        let rows_bottom = rows_top + f64::from(clip.height());
+
         #[allow(clippy::float_cmp)]
         let row_range = if self.table.num_rows == 0 || viewport.top() == viewport.bottom() {
             0..0
@@ -966,9 +1082,7 @@ impl TableSplitScrollDelegate<'_> {
             // We do the UI for all rows during a sizing pass, so we can auto-size rows and columns
             0..self.table.num_rows
         } else {
-            let row_idx_at = |y: f32| -> u64 { self.get_row_nr_at_y_offset(y - last_header_row_y) };
-
-            row_idx_at(viewport.min.y)..row_idx_at(viewport.max.y) + 1
+            self.row_at(rows_top)..self.row_at(rows_bottom) + 1
         };
 
         if do_prefetch {
@@ -1010,14 +1124,16 @@ impl TableSplitScrollDelegate<'_> {
         let current_frame = ui.ctx().cumulative_frame_nr();
         let hovered_row_id = self.id.with("hovered_row");
 
+        // Rows move vertically by the map, columns horizontally by the scroll offset.
+        let horizontal = vec2(-scroll_offset.x, 0.0);
         for row_nr in row_range {
             let y_range = Rangef::new(
-                last_header_row_y + self.get_row_top_offset(row_nr),
-                last_header_row_y + self.get_row_top_offset(row_nr + 1),
+                last_header_row_y + (self.row_top(row_nr) - content_top) as f32,
+                last_header_row_y + (self.row_top(row_nr + 1) - content_top) as f32,
             );
 
             let row_x_range = self.col_x[0]..=self.col_x[self.col_x.len() - 1];
-            let row_rect = Rect::from_x_y_ranges(row_x_range, y_range).translate(-scroll_offset);
+            let row_rect = Rect::from_x_y_ranges(row_x_range, y_range).translate(horizontal);
 
             // Check if the cursor is hovering over the visible portion of this row
             if let Some(pos) = pointer_pos {
@@ -1059,7 +1175,7 @@ impl TableSplitScrollDelegate<'_> {
                 let column = &self.table.columns[col_nr];
                 let mut cell_rect =
                     Rect::from_x_y_ranges(self.col_x[col_nr]..=self.col_x[col_nr + 1], y_range)
-                        .translate(-scroll_offset);
+                        .translate(horizontal);
                 let clip_rect = cell_rect;
                 let auto_size_this_frame = column.is_auto_size_this_frame();
                 if auto_size_this_frame {
@@ -1145,18 +1261,44 @@ impl SplitScrollDelegate for TableSplitScrollDelegate<'_> {
             }
 
             if let Some((row_range, align)) = &self.table.scroll_to_rows {
-                let y_from_row_nr =
-                    |row_nr: u64| -> f32 { ui.min_rect().top() + self.get_row_top_offset(row_nr) };
-
                 let last_header_row_y = self.header_row_y.last().copied().unwrap_or(0.0);
                 let sticky_height = last_header_row_y - self.header_row_y[0];
 
-                // Subtract sticky_height from the top of the target rect so that when
-                // scroll_to_rect aligns the top of the target to the viewport top, the
-                // actual row lands just below the sticky header (not behind it).
-                target_rect.min.y = y_from_row_nr(*row_range.start()) - sticky_height;
-                target_rect.max.y = y_from_row_nr(*row_range.end() + 1);
-                target_align = target_align.or(*align);
+                if self.vertical.scaled {
+                    // The scroll offset isn't a row offset here (see `VerticalMap`): choose where
+                    // the rows should be, then scroll to the offset that shows them there. A
+                    // column scrolled to at the same time is aligned to the left.
+                    let current = self.vertical.content_offset(scroll_offset.y);
+                    let viewport = self.vertical.viewport;
+                    let top = self.row_top(*row_range.start());
+                    let bottom = self.row_top(row_range.end() + 1);
+                    let wanted = match align {
+                        Some(Align::Min) => top,
+                        Some(Align::Max) => bottom - viewport,
+                        Some(Align::Center) => (top + bottom - viewport) / 2.0,
+                        None if top < current => top,
+                        None if bottom > current + viewport => bottom - viewport,
+                        None => current,
+                    };
+                    let scroll = self.vertical.scroll_offset(wanted);
+                    // egui leaves `item_spacing` above a top-aligned target, which the scaling
+                    // would multiply: aim that much lower so the offset lands exactly.
+                    target_rect.min.y =
+                        ui.min_rect().top() - sticky_height + scroll + ui.spacing().item_spacing.y;
+                    target_rect.max.y = target_rect.min.y;
+                    target_align = Some(Align::Min);
+                } else {
+                    let y_from_row_nr = |row_nr: u64| -> f32 {
+                        ui.min_rect().top() + self.get_row_top_offset(row_nr)
+                    };
+
+                    // Subtract sticky_height from the top of the target rect so that when
+                    // scroll_to_rect aligns the top of the target to the viewport top, the
+                    // actual row lands just below the sticky header (not behind it).
+                    target_rect.min.y = y_from_row_nr(*row_range.start()) - sticky_height;
+                    target_rect.max.y = y_from_row_nr(*row_range.end() + 1);
+                    target_align = target_align.or(*align);
+                }
             }
 
             ui.scroll_to_rect(target_rect, target_align);
@@ -1174,7 +1316,6 @@ impl SplitScrollDelegate for TableSplitScrollDelegate<'_> {
     }
 
     fn paint_overlays(&mut self, ui: &mut Ui) {
-        let total_rows_height = self.get_row_top_offset(self.table.num_rows);
         let header_bottom = self.header_row_y.last().copied().unwrap_or(0.0);
         let clip_bottom = ui.clip_rect().bottom();
 
@@ -1210,7 +1351,9 @@ impl SplitScrollDelegate for TableSplitScrollDelegate<'_> {
                 .unwrap_or(current);
 
             let mut x = self.col_x[col_nr + 1] - scroll_offset.x + (column_width - current);
-            let content_bottom = header_bottom + total_rows_height - scroll_offset.y;
+            let content_bottom = header_bottom
+                + (self.vertical.rows_height - self.vertical.content_offset(scroll_offset.y))
+                    as f32;
             let line_bottom = clip_bottom.min(content_bottom);
             let yrange = Rangef::new(*top, line_bottom);
 
@@ -1343,7 +1486,161 @@ fn partition_point(range: RangeInclusive<u64>, second_partition: impl Fn(u64) ->
 
 #[cfg(test)]
 mod tests {
-    use super::partition_point;
+    use std::collections::BTreeMap;
+
+    use egui::{Align, Rect, Ui};
+
+    use super::{
+        CellInfo, Column, HeaderCellInfo, HeaderRow, Table, TableDelegate, VerticalMap,
+        partition_point,
+    };
+
+    /// Records where each row was drawn.
+    struct Recorder {
+        rows: BTreeMap<u64, Rect>,
+    }
+
+    impl TableDelegate for Recorder {
+        fn header_cell_ui(&mut self, _ui: &mut Ui, _cell: &HeaderCellInfo) {}
+
+        fn cell_ui(&mut self, ui: &mut Ui, cell: &CellInfo) {
+            self.rows.insert(cell.row_nr, ui.max_rect());
+        }
+    }
+
+    const ROW: f32 = 20.0;
+    const HEADER: f32 = 20.0;
+
+    /// Shows a table of `rows` rows in a 400×300 window for a few frames, scrolled to `target`,
+    /// and returns where its rows were drawn in the last frame, with the rows' region.
+    fn draw(rows: u64, target: Option<(u64, Option<Align>)>) -> (BTreeMap<u64, Rect>, Rect) {
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.scroll_animation = egui::style::ScrollAnimation::none());
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 300.0),
+            )),
+            ..Default::default()
+        };
+        let mut recorder = Recorder {
+            rows: BTreeMap::new(),
+        };
+        let mut region = Rect::NOTHING;
+        for _ in 0..4 {
+            recorder.rows.clear();
+            let mut output = ctx.run_ui(input(), |ui| {
+                let top = ui.cursor().top();
+                let mut table = Table::new()
+                    .id_salt("tall")
+                    .num_rows(rows)
+                    .columns(vec![Column::new(100.0)])
+                    .headers([HeaderRow::new(HEADER)]);
+                if let Some((row, align)) = target {
+                    table = table.scroll_to_row(row, align);
+                }
+                let response = table.show(ui, &mut recorder);
+                region = Rect::from_x_y_ranges(
+                    response.rect.x_range(),
+                    top + HEADER..=response.rect.bottom(),
+                );
+            });
+            output.textures_delta.clear();
+        }
+        (recorder.rows, region)
+    }
+
+    /// The rows drawn follow each other exactly, each `ROW` tall.
+    fn assert_contiguous(rows: &BTreeMap<u64, Rect>) {
+        let mut previous: Option<(u64, Rect)> = None;
+        for (&row, &rect) in rows {
+            assert!(
+                (rect.height() - ROW).abs() < 1e-3,
+                "row {row} is {} tall",
+                rect.height()
+            );
+            if let Some((before, above)) = previous {
+                assert_eq!(row, before + 1, "rows skipped between {before} and {row}");
+                assert!(
+                    (rect.top() - above.bottom()).abs() < 1e-3,
+                    "row {row} starts at {} after {before} ends at {}",
+                    rect.top(),
+                    above.bottom()
+                );
+            }
+            previous = Some((row, rect));
+        }
+    }
+
+    #[test]
+    fn short_tables_scroll_one_to_one() {
+        let map = VerticalMap::new(2_000.0, 300.0, Some(ROW));
+        assert!(!map.scaled);
+        assert_eq!(map.scroll_height, 2_000.0);
+        assert_eq!(map.content_offset(123.5), 123.5);
+        assert_eq!(map.scroll_offset(123.5), 123.5);
+        assert_eq!(map.wheel_factor(), 1.0);
+    }
+
+    #[test]
+    fn tall_tables_with_variable_rows_scroll_one_to_one() {
+        let map = VerticalMap::new(1e9, 300.0, None);
+        assert!(!map.scaled);
+        assert_eq!(map.content_offset(5_000.0), 5_000.0);
+    }
+
+    #[test]
+    fn tall_tables_map_their_scroll_range_onto_the_rows() {
+        let rows_height = 100_000_000.0;
+        let map = VerticalMap::new(rows_height, 300.0, Some(ROW));
+        assert!(map.scaled);
+        assert_eq!(map.scroll_height, VerticalMap::MAX_SCROLL_HEIGHT);
+        assert_eq!(map.content_offset(0.0), 0.0);
+        let end = f64::from(VerticalMap::MAX_SCROLL_HEIGHT) - 300.0;
+        assert_eq!(map.content_offset(end as f32), rows_height - 300.0);
+        let middle = map.content_offset(map.scroll_offset(50_000_000.0));
+        assert!((middle - 50_000_000.0).abs() < 32.0, "{middle}");
+        let ratio = (f64::from(VerticalMap::MAX_SCROLL_HEIGHT) - 300.0) / (rows_height - 300.0);
+        assert!((f64::from(map.wheel_factor()) / ratio - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rows_of_a_short_table_are_drawn_where_they_always_were() {
+        let (rows, region) = draw(100, None);
+        assert_contiguous(&rows);
+        assert_eq!(rows.keys().next(), Some(&0));
+        assert!((rows[&0].top() - region.top()).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_last_of_five_million_rows_ends_at_the_bottom() {
+        let rows_count = 5_000_000;
+        let (rows, region) = draw(rows_count, Some((rows_count - 1, Some(Align::Max))));
+        assert_contiguous(&rows);
+        let last = rows.get(&(rows_count - 1)).expect("the last row is drawn");
+        assert!(
+            (last.bottom() - region.bottom()).abs() < 1e-2,
+            "the last row ends at {}, the table at {}",
+            last.bottom(),
+            region.bottom()
+        );
+    }
+
+    #[test]
+    fn a_row_far_down_a_tall_table_is_scrolled_to_exactly() {
+        let target = 3_333_333;
+        let (rows, region) = draw(5_000_000, Some((target, Some(Align::Min))));
+        assert_contiguous(&rows);
+        let row = rows.get(&target).expect("the row is drawn");
+        // What an `f32` scroll offset can address (see `VerticalMap`).
+        let addressable = 5_000_000.0 * ROW * f32::EPSILON;
+        assert!(
+            (row.top() - region.top()).abs() < addressable,
+            "the row starts at {}, the rows at {}",
+            row.top(),
+            region.top()
+        );
+    }
 
     #[test]
     fn test_partition_point() {
