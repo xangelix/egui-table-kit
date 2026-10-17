@@ -731,3 +731,56 @@ fn a_selected_row_answers_the_pointer_only_when_asked() {
     // Unset, as before: the selection alone.
     assert!(!selected_row_paints(None, marker));
 }
+
+/// The colour a selected row's text was drawn in, with the text colour asked for (or none).
+fn selected_text_drawn(color: Option<egui::Color32>) -> Option<egui::Color32> {
+    let ctx = egui::Context::default();
+    let data = Data::default();
+    let mut state = explorer();
+    state.selected_rows.insert(0);
+    let mut drawn = None;
+    for time in [0.0, 0.05] {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    egui::vec2(500.0, 350.0),
+                )),
+                time: Some(time),
+                ..Default::default()
+            },
+            |ui| {
+                let mut table = TableKit::new("selected-text", &data, &mut state)
+                    .with_row_height(24.0)
+                    .with_columns(vec![crate::layout::Column::new(180.0)]);
+                if let Some(color) = color {
+                    table = table.with_selected_text_color(color);
+                }
+                table.show_with_output(ui, |_, _, _, _| None).unwrap();
+            },
+        );
+        output.textures_delta.clear();
+        drawn = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Alpha" => text
+                    .galley
+                    .job
+                    .sections
+                    .first()
+                    .map(|section| section.format.color),
+                _ => None,
+            });
+    }
+    drawn
+}
+
+#[test]
+fn a_selected_row_s_text_takes_the_colour_asked_for() {
+    let asked = egui::Color32::from_rgb(9, 8, 7);
+    assert_eq!(selected_text_drawn(Some(asked)), Some(asked));
+    // Unset, the selection stroke's colour, as before.
+    let stroke = egui::Visuals::dark().selection.stroke.color;
+    assert_eq!(selected_text_drawn(None), Some(stroke));
+}

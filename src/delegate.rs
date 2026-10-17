@@ -43,6 +43,8 @@ pub struct TableKitDelegate<'a> {
     pub hover_color: Option<Color32>,
     /// An overlay over a selected row while hovered; `None` leaves it as it is.
     pub selected_hover_color: Option<Color32>,
+    /// The text colour of a selected row's cells; `None` keeps the selection stroke's.
+    pub selected_text_color: Option<Color32>,
 
     /// Opt-in drag sensing; existing consumers keep click-only interaction.
     pub drag_enabled: bool,
@@ -96,6 +98,7 @@ impl<'a> TableKitDelegate<'a> {
             striping_color: None,
             hover_color: None,
             selected_hover_color: None,
+            selected_text_color: None,
             drag_enabled: false,
             track_events: false,
             track_geometry: false,
@@ -309,7 +312,8 @@ impl TableDelegate for TableKitDelegate<'_> {
 
         // Set up cell text color matching selection state
         let text_color = if is_selected {
-            ui.visuals().selection.stroke.color
+            self.selected_text_color
+                .unwrap_or(ui.visuals().selection.stroke.color)
         } else {
             ui.visuals().widgets.inactive.text_color()
         };

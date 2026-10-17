@@ -19,6 +19,7 @@ pub struct TableKit<'a> {
     striping_color: Option<egui::Color32>,
     hover_color: Option<egui::Color32>,
     selected_hover_color: Option<egui::Color32>,
+    selected_text_color: Option<egui::Color32>,
     max_height: Option<f32>,
     max_rows: Option<u64>,
     columns: Option<Vec<crate::layout::Column>>,
@@ -46,6 +47,7 @@ impl<'a> TableKit<'a> {
             striping_color: None,
             hover_color: None,
             selected_hover_color: None,
+            selected_text_color: None,
             max_height: Some(400.0), // Default limit fallback
             max_rows: None,
             columns: None,
@@ -145,6 +147,14 @@ impl<'a> TableKit<'a> {
     #[must_use]
     pub const fn with_selected_hover_color(mut self, color: egui::Color32) -> Self {
         self.selected_hover_color = Some(color);
+        self
+    }
+
+    /// Set the text colour of a selected row's cells (and the colour custom cells are given for
+    /// it). Unset, it is the selection stroke's colour, as before.
+    #[must_use]
+    pub const fn with_selected_text_color(mut self, color: egui::Color32) -> Self {
+        self.selected_text_color = Some(color);
         self
     }
 
@@ -292,6 +302,7 @@ impl<'a> TableKit<'a> {
             delegate.striping_color = self.striping_color;
             delegate.hover_color = self.hover_color;
             delegate.selected_hover_color = self.selected_hover_color;
+            delegate.selected_text_color = self.selected_text_color;
             delegate.drag_enabled = self.drag_enabled;
             delegate.column_map = self.column_map;
             delegate.track_events = track_events;
