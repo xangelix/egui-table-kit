@@ -679,3 +679,55 @@ fn a_cell_s_text_sits_across_the_row_as_the_caller_asks() {
         "at the bottom: {text:?} in {row:?}"
     );
 }
+
+/// Whether a frame with the first row selected and the pointer on it paints `marker`, the
+/// overlay asked for (or none).
+fn selected_row_paints(overlay: Option<egui::Color32>, marker: egui::Color32) -> bool {
+    let ctx = egui::Context::default();
+    let data = Data::default();
+    let mut state = explorer();
+    state.selected_rows.insert(0);
+    let mut painted = false;
+    let mut row_center = None;
+    for time in [0.0, 0.05, 0.1] {
+        let mut result = None;
+        let events = row_center
+            .map(|center| vec![Event::PointerMoved(center)])
+            .unwrap_or_default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    egui::vec2(500.0, 350.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let mut table = TableKit::new("selected-hover", &data, &mut state)
+                    .with_row_height(24.0)
+                    .with_columns(vec![crate::layout::Column::new(180.0)]);
+                if let Some(overlay) = overlay {
+                    table = table.with_selected_hover_color(overlay);
+                }
+                result = Some(table.show_with_output(ui, |_, _, _, _| None));
+            },
+        );
+        output.textures_delta.clear();
+        let table = result.unwrap().unwrap();
+        row_center = table.rows.first().map(|row| row.rect.center());
+        painted = output.shapes.iter().any(
+            |clipped| matches!(&clipped.shape, egui::Shape::Rect(rect) if rect.fill == marker),
+        );
+    }
+    painted
+}
+
+#[test]
+fn a_selected_row_answers_the_pointer_only_when_asked() {
+    let marker = egui::Color32::from_rgb(1, 2, 3);
+    assert!(selected_row_paints(Some(marker), marker));
+    // Unset, as before: the selection alone.
+    assert!(!selected_row_paints(None, marker));
+}

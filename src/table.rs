@@ -18,6 +18,7 @@ pub struct TableKit<'a> {
     striped: bool,
     striping_color: Option<egui::Color32>,
     hover_color: Option<egui::Color32>,
+    selected_hover_color: Option<egui::Color32>,
     max_height: Option<f32>,
     max_rows: Option<u64>,
     columns: Option<Vec<crate::layout::Column>>,
@@ -44,6 +45,7 @@ impl<'a> TableKit<'a> {
             striped: false,
             striping_color: None,
             hover_color: None,
+            selected_hover_color: None,
             max_height: Some(400.0), // Default limit fallback
             max_rows: None,
             columns: None,
@@ -135,6 +137,14 @@ impl<'a> TableKit<'a> {
     #[must_use]
     pub const fn with_hover_color(mut self, color: egui::Color32) -> Self {
         self.hover_color = Some(color);
+        self
+    }
+
+    /// Set an overlay painted over a selected row while it is hovered, so it answers the pointer
+    /// as other rows do. Unset, a selected row doesn't change on hover.
+    #[must_use]
+    pub const fn with_selected_hover_color(mut self, color: egui::Color32) -> Self {
+        self.selected_hover_color = Some(color);
         self
     }
 
@@ -281,6 +291,7 @@ impl<'a> TableKit<'a> {
             delegate.striped = self.striped;
             delegate.striping_color = self.striping_color;
             delegate.hover_color = self.hover_color;
+            delegate.selected_hover_color = self.selected_hover_color;
             delegate.drag_enabled = self.drag_enabled;
             delegate.column_map = self.column_map;
             delegate.track_events = track_events;

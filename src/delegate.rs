@@ -41,6 +41,8 @@ pub struct TableKitDelegate<'a> {
     pub striped: bool,
     pub striping_color: Option<Color32>,
     pub hover_color: Option<Color32>,
+    /// An overlay over a selected row while hovered; `None` leaves it as it is.
+    pub selected_hover_color: Option<Color32>,
 
     /// Opt-in drag sensing; existing consumers keep click-only interaction.
     pub drag_enabled: bool,
@@ -93,6 +95,7 @@ impl<'a> TableKitDelegate<'a> {
             striped: false,
             striping_color: None,
             hover_color: None,
+            selected_hover_color: None,
             drag_enabled: false,
             track_events: false,
             track_geometry: false,
@@ -238,6 +241,10 @@ impl TableDelegate for TableKitDelegate<'_> {
                 egui::CornerRadius::ZERO,
                 ui.visuals().selection.bg_fill,
             );
+            if row_hovered && let Some(overlay) = self.selected_hover_color {
+                ui.painter()
+                    .rect_filled(cell_rect, egui::CornerRadius::ZERO, overlay);
+            }
         } else {
             // 1. Base layer
             let base_color = if let Some(rgb) = highlight_rgb {
