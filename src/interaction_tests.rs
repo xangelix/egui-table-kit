@@ -784,3 +784,52 @@ fn a_selected_row_s_text_takes_the_colour_asked_for() {
     let stroke = egui::Visuals::dark().selection.stroke.color;
     assert_eq!(selected_text_drawn(None), Some(stroke));
 }
+
+/// How many of a frame's rectangles are outlined in the selection stroke's colour, with the
+/// first row focused and the focus outline as asked.
+fn focus_outlines(outline: bool) -> usize {
+    let ctx = egui::Context::default();
+    let data = Data::default();
+    let mut state = explorer();
+    state.focused_key = Some(data.row_key(0));
+    let stroke = egui::Visuals::dark().selection.stroke;
+    let mut outlines = 0;
+    for time in [0.0, 0.05] {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    egui::vec2(500.0, 350.0),
+                )),
+                time: Some(time),
+                ..Default::default()
+            },
+            |ui| {
+                TableKit::new("focus-outline", &data, &mut state)
+                    .with_row_height(24.0)
+                    .with_columns(vec![
+                        crate::layout::Column::new(180.0),
+                        crate::layout::Column::new(180.0),
+                    ])
+                    .with_focus_outline(outline)
+                    .show_with_output(ui, |_, _, _, _| None)
+                    .unwrap();
+            },
+        );
+        output.textures_delta.clear();
+        outlines = output
+            .shapes
+            .iter()
+            .filter(|clipped| {
+                matches!(&clipped.shape, egui::Shape::Rect(rect) if rect.stroke == stroke)
+            })
+            .count();
+    }
+    outlines
+}
+
+#[test]
+fn the_focused_row_is_outlined_unless_asked_not_to_be() {
+    assert!(focus_outlines(true) >= 2, "each cell, as before");
+    assert_eq!(focus_outlines(false), 0);
+}

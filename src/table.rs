@@ -20,6 +20,7 @@ pub struct TableKit<'a> {
     hover_color: Option<egui::Color32>,
     selected_hover_color: Option<egui::Color32>,
     selected_text_color: Option<egui::Color32>,
+    focus_outline: bool,
     max_height: Option<f32>,
     max_rows: Option<u64>,
     columns: Option<Vec<crate::layout::Column>>,
@@ -48,6 +49,7 @@ impl<'a> TableKit<'a> {
             hover_color: None,
             selected_hover_color: None,
             selected_text_color: None,
+            focus_outline: true,
             max_height: Some(400.0), // Default limit fallback
             max_rows: None,
             columns: None,
@@ -155,6 +157,14 @@ impl<'a> TableKit<'a> {
     #[must_use]
     pub const fn with_selected_text_color(mut self, color: egui::Color32) -> Self {
         self.selected_text_color = Some(color);
+        self
+    }
+
+    /// Set whether the focused row's cells are outlined (each its own outline). Off suits a
+    /// table whose selection already shows where the keyboard is. On by default, as before.
+    #[must_use]
+    pub const fn with_focus_outline(mut self, outline: bool) -> Self {
+        self.focus_outline = outline;
         self
     }
 
@@ -303,6 +313,7 @@ impl<'a> TableKit<'a> {
             delegate.hover_color = self.hover_color;
             delegate.selected_hover_color = self.selected_hover_color;
             delegate.selected_text_color = self.selected_text_color;
+            delegate.focus_outline = self.focus_outline;
             delegate.drag_enabled = self.drag_enabled;
             delegate.column_map = self.column_map;
             delegate.track_events = track_events;

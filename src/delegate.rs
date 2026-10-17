@@ -45,6 +45,8 @@ pub struct TableKitDelegate<'a> {
     pub selected_hover_color: Option<Color32>,
     /// The text colour of a selected row's cells; `None` keeps the selection stroke's.
     pub selected_text_color: Option<Color32>,
+    /// Whether the focused row's cells are outlined.
+    pub focus_outline: bool,
 
     /// Opt-in drag sensing; existing consumers keep click-only interaction.
     pub drag_enabled: bool,
@@ -99,6 +101,7 @@ impl<'a> TableKitDelegate<'a> {
             hover_color: None,
             selected_hover_color: None,
             selected_text_color: None,
+            focus_outline: true,
             drag_enabled: false,
             track_events: false,
             track_geometry: false,
@@ -561,7 +564,7 @@ impl TableDelegate for TableKitDelegate<'_> {
                 )
             });
         }
-        if self.state.focused_key == Some(key) {
+        if self.focus_outline && self.state.focused_key == Some(key) {
             let clipped = cell_rect.intersect(ui.clip_rect());
             if clipped.is_positive() {
                 ui.painter().rect_stroke(
