@@ -3,7 +3,7 @@ use egui::{Color32, Margin, Response, Sense, Ui};
 use super::{
     error::TableError,
     filter::highlight::select_color,
-    header::{ColResponse, HeaderMenuAnchor, show_header_cell_contents},
+    header::{ColResponse, HeaderMenuAnchor, show_header_cell_contents, text_row},
     layout::{CellInfo, HeaderCellInfo, PrefetchInfo, TableDelegate},
     operations::{BorrowedRow, Row, TableProvider},
     state::TableState,
@@ -33,6 +33,9 @@ pub struct TableKitDelegate<'a> {
     pub hovered_row: Option<u64>,
     pub header_menu_anchor: HeaderMenuAnchor,
     pub row_height: f32,
+    /// Where the built-in cell text and the headers' titles sit across a row's height; `None`
+    /// lays them out as `ui.horizontal` does. Custom cells lay out their own contents.
+    pub cell_align: Option<egui::Align>,
     pub header_bg_color: Option<Color32>,
 
     pub striped: bool,
@@ -85,6 +88,7 @@ impl<'a> TableKitDelegate<'a> {
             hovered_row: None,
             header_menu_anchor: HeaderMenuAnchor::Cursor,
             row_height: 16.0,
+            cell_align: None,
             header_bg_color: None,
             striped: false,
             striping_color: None,
@@ -166,6 +170,7 @@ impl TableDelegate for TableKitDelegate<'_> {
                 self.org_colors,
                 self.user_colors,
                 self.header_menu_anchor,
+                self.cell_align,
             ) {
                 Ok(response) => {
                     if col_idx >= self.collected_responses.len() {
@@ -578,7 +583,7 @@ impl TableDelegate for TableKitDelegate<'_> {
                 }
 
                 if !rendered && let Some((val, _)) = &value {
-                    ui.horizontal(|ui| {
+                    text_row(ui, self.cell_align, |ui| {
                         ui.add(
                             egui::Label::new(egui::RichText::new(val.as_ref()).color(text_color))
                                 .selectable(false)

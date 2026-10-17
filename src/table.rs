@@ -11,6 +11,7 @@ pub struct TableKit<'a> {
     provider: &'a dyn TableProvider,
     state: &'a mut TableState,
     row_height: f32,
+    cell_align: Option<egui::Align>,
     org_colors: &'a [[u8; 3]],
     user_colors: &'a [[u8; 3]],
     scroll_to_row: Option<(u64, egui::Align)>,
@@ -36,6 +37,7 @@ impl<'a> TableKit<'a> {
             provider,
             state,
             row_height: 16.0,
+            cell_align: None,
             org_colors: &[],
             user_colors: &[],
             scroll_to_row: None,
@@ -66,6 +68,18 @@ impl<'a> TableKit<'a> {
     #[must_use]
     pub const fn with_row_height(mut self, height: f32) -> Self {
         self.row_height = height;
+        self
+    }
+
+    /// Where text sits across a row's height, in the table's own cells and its headers:
+    /// [`egui::Align::Center`] in the middle, [`egui::Align::Min`] at the top (to line up with
+    /// the first line of taller custom cells beside it), [`egui::Align::Max`] at the bottom.
+    /// Unset, the text is laid out as `ui.horizontal` lays it out: in a row as tall as the
+    /// style's widgets (`interact_size`), centered in a taller cell but from the top of a
+    /// shorter one, where it sits low. Custom cells lay out their own contents.
+    #[must_use]
+    pub const fn with_cell_align(mut self, align: egui::Align) -> Self {
+        self.cell_align = Some(align);
         self
     }
 
@@ -263,6 +277,7 @@ impl<'a> TableKit<'a> {
                 &mut secondary_clicked,
             );
             delegate.row_height = self.row_height;
+            delegate.cell_align = self.cell_align;
             delegate.striped = self.striped;
             delegate.striping_color = self.striping_color;
             delegate.hover_color = self.hover_color;

@@ -47,7 +47,26 @@ pub const fn set_menu_style(style: &mut egui::Style) {
     style.visuals.selection.stroke.color = egui::Color32::from_rgb(86, 92, 128);
 }
 
-/// Interactive header cell renderer.
+/// Lays out a cell's (or header's) contents in a row: across the cell's own height as `align`
+/// says, or, without one, as `ui.horizontal` does (in a row `interact_size` tall, centered in a
+/// taller cell, from the top of a shorter one).
+pub(crate) fn text_row<R>(
+    ui: &mut egui::Ui,
+    align: Option<egui::Align>,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    match align {
+        Some(align) => {
+            ui.with_layout(egui::Layout::left_to_right(align), add_contents)
+                .inner
+        }
+        None => ui.horizontal(add_contents).inner,
+    }
+}
+
+/// Interactive header cell renderer; its title sits across the header's height as `align` says
+/// (as `ui.horizontal` places it, without one).
+#[allow(clippy::too_many_arguments)] // Each is one setting of the header's look.
 pub fn show_header_cell_contents(
     ui: &mut egui::Ui,
     text: &str,
@@ -56,6 +75,7 @@ pub fn show_header_cell_contents(
     org_colors: &[[u8; 3]],
     user_colors: &[[u8; 3]],
     anchor_mode: HeaderMenuAnchor,
+    align: Option<egui::Align>,
 ) -> Result<ColResponse, TableError> {
     let mut response = ColResponse {
         filtering: previous_response.filtering.clone(),
@@ -119,7 +139,7 @@ pub fn show_header_cell_contents(
         solid_width = current_offset + 12.0;
     }
 
-    ui.horizontal(|ui| {
+    text_row(ui, align, |ui| {
         ui.add_space(8.0);
 
         if ui.is_sizing_pass() {
@@ -147,7 +167,7 @@ pub fn show_header_cell_contents(
             ui.allocate_ui(
                 egui::vec2(max_container_width, ui.available_height()),
                 |ui| {
-                    ui.horizontal(|ui| {
+                    text_row(ui, align, |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
 
                         let sort_width = if show_sort { 14.0 } else { 0.0 };

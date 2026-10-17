@@ -588,3 +588,94 @@ fn test_header_cell_ui_call_count_with_sticky_cols() {
     assert_eq!(col0_calls.load(Ordering::SeqCst), 1);
     assert_eq!(col1_calls.load(Ordering::SeqCst), 1);
 }
+
+/// Where `wanted` was drawn as text among `shapes`.
+fn text_rect(shapes: &[egui::epaint::ClippedShape], wanted: &str) -> Option<egui::Rect> {
+    fn find(shape: &egui::Shape, wanted: &str) -> Option<egui::Rect> {
+        match shape {
+            egui::Shape::Text(text) if text.galley.text() == wanted => {
+                Some(text.visual_bounding_rect())
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().find_map(|shape| find(shape, wanted)),
+            _ => None,
+        }
+    }
+    shapes
+        .iter()
+        .find_map(|clipped| find(&clipped.shape, wanted))
+}
+
+/// A frame of rows `height` points tall, in a style whose widgets are 26 tall, with the cells'
+/// text aligned as `align` says (unset: as `ui.horizontal` places it): the first row's
+/// rectangle, and where its text was drawn.
+fn aligned(height: f32, align: Option<egui::Align>) -> (egui::Rect, egui::Rect) {
+    let ctx = egui::Context::default();
+    ctx.all_styles_mut(|style| style.spacing.interact_size.y = 26.0);
+    let data = Data::default();
+    let mut state = explorer();
+    let mut drawn = (egui::Rect::NOTHING, egui::Rect::NOTHING);
+    for time in [0.0, 0.05] {
+        let mut result = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    egui::vec2(500.0, 350.0),
+                )),
+                time: Some(time),
+                ..Default::default()
+            },
+            |ui| {
+                let mut table = TableKit::new("aligned", &data, &mut state)
+                    .with_row_height(height)
+                    .with_columns(vec![crate::layout::Column::new(180.0)]);
+                if let Some(align) = align {
+                    table = table.with_cell_align(align);
+                }
+                result = Some(table.show_with_output(ui, |_, _, _, _| None));
+            },
+        );
+        output.textures_delta.clear();
+        let table = result.unwrap().unwrap();
+        if let (Some(row), Some(text)) = (table.rows.first(), text_rect(&output.shapes, "Alpha")) {
+            drawn = (row.rect, text);
+        }
+    }
+    drawn
+}
+
+#[test]
+fn a_cell_s_text_sits_across_the_row_as_the_caller_asks() {
+    // Unset, as `ui.horizontal` places it: centered in a row taller than the style's widgets,
+    // but from the top (low) in one shorter.
+    let (row, text) = aligned(48.0, None);
+    assert!(row.is_positive() && text.is_positive());
+    assert!(
+        (text.center().y - row.center().y).abs() <= 1.5,
+        "unset, tall: {text:?} in {row:?}"
+    );
+    let (row, text) = aligned(16.0, None);
+    assert!(
+        text.center().y - row.center().y > 3.0,
+        "unset, short: {text:?} in {row:?}"
+    );
+    // Centered, whatever height the style gives widgets.
+    for height in [16.0, 48.0] {
+        let (row, text) = aligned(height, Some(egui::Align::Center));
+        assert!(
+            (text.center().y - row.center().y).abs() <= 1.5,
+            "centered: {text:?} in {row:?}"
+        );
+    }
+    // At the top, for rows beside taller custom cells; or at the bottom.
+    let (row, text) = aligned(48.0, Some(egui::Align::Min));
+    assert!(
+        text.top() - row.top() < 4.0,
+        "at the top: {text:?} in {row:?}"
+    );
+    let (row, text) = aligned(48.0, Some(egui::Align::Max));
+    assert!(
+        row.bottom() - text.bottom() < 4.0,
+        "at the bottom: {text:?} in {row:?}"
+    );
+}
