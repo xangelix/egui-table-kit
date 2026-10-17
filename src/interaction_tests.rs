@@ -833,3 +833,54 @@ fn the_focused_row_is_outlined_unless_asked_not_to_be() {
     assert!(focus_outlines(true) >= 2, "each cell, as before");
     assert_eq!(focus_outlines(false), 0);
 }
+
+/// Whether a frame drew the header's title "Name", and the first row's rectangle, with the
+/// header as asked.
+fn header_drawn(header: bool) -> (bool, egui::Rect) {
+    let ctx = egui::Context::default();
+    let data = Data::default();
+    let mut state = explorer();
+    let mut drawn = (false, egui::Rect::NOTHING);
+    for time in [0.0, 0.05] {
+        let mut result = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    egui::vec2(500.0, 350.0),
+                )),
+                time: Some(time),
+                ..Default::default()
+            },
+            |ui| {
+                result = Some(
+                    TableKit::new("header", &data, &mut state)
+                        .with_row_height(24.0)
+                        .with_columns(vec![crate::layout::Column::new(180.0)])
+                        .with_header(header)
+                        .show_with_output(ui, |_, _, _, _| None),
+                );
+            },
+        );
+        output.textures_delta.clear();
+        let table = result.unwrap().unwrap();
+        let first = table
+            .rows
+            .first()
+            .map_or(egui::Rect::NOTHING, |row| row.rect);
+        drawn = (text_rect(&output.shapes, "Name").is_some(), first);
+    }
+    drawn
+}
+
+#[test]
+fn the_header_can_be_left_out() {
+    let (titled, below) = header_drawn(true);
+    assert!(titled, "shown by default");
+    let (untitled, first) = header_drawn(false);
+    assert!(!untitled);
+    assert!(
+        first.is_positive() && first.top() < below.top(),
+        "rows begin at the top"
+    );
+}

@@ -21,6 +21,7 @@ pub struct TableKit<'a> {
     selected_hover_color: Option<egui::Color32>,
     selected_text_color: Option<egui::Color32>,
     focus_outline: bool,
+    header: bool,
     max_height: Option<f32>,
     max_rows: Option<u64>,
     columns: Option<Vec<crate::layout::Column>>,
@@ -50,6 +51,7 @@ impl<'a> TableKit<'a> {
             selected_hover_color: None,
             selected_text_color: None,
             focus_outline: true,
+            header: true,
             max_height: Some(400.0), // Default limit fallback
             max_rows: None,
             columns: None,
@@ -168,6 +170,14 @@ impl<'a> TableKit<'a> {
         self
     }
 
+    /// Set whether the header row (the columns' titles, sorting, filters) is shown. A list
+    /// whose columns explain themselves may leave it out. Shown by default, as before.
+    #[must_use]
+    pub const fn with_header(mut self, header: bool) -> Self {
+        self.header = header;
+        self
+    }
+
     /// Select/reorder provider columns. Custom cell callbacks receive provider column indices.
     #[must_use]
     pub fn with_column_map(mut self, columns: Vec<usize>) -> Self {
@@ -273,7 +283,11 @@ impl<'a> TableKit<'a> {
             .num_rows(self.state.active_rows.len() as u64)
             .columns(columns)
             .auto_size_mode(self.auto_size_mode) // <--- Forward auto-size mode
-            .headers([crate::layout::HeaderRow::new(self.row_height)]);
+            .headers(if self.header {
+                vec![crate::layout::HeaderRow::new(self.row_height)]
+            } else {
+                Vec::new()
+            });
 
         // Apply scroll-to-row instruction to the table builder
         if let Some((row_nr, align)) = self.scroll_to_row {
