@@ -884,3 +884,77 @@ fn the_header_can_be_left_out() {
         "rows begin at the top"
     );
 }
+
+/// The corners of the selected first row's fills, each cell's, left to right, with its rows'
+/// outer corners rounded as asked.
+fn selected_corners(rounding: Option<u8>) -> Vec<egui::CornerRadius> {
+    let ctx = egui::Context::default();
+    let data = Data::default();
+    let mut state = explorer();
+    state.selected_rows.insert(0);
+    let fill = egui::Visuals::dark().selection.bg_fill;
+    let mut corners = Vec::new();
+    for time in [0.0, 0.05] {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    egui::vec2(500.0, 350.0),
+                )),
+                time: Some(time),
+                ..Default::default()
+            },
+            |ui| {
+                let mut table = TableKit::new("row-rounding", &data, &mut state)
+                    .with_row_height(24.0)
+                    .with_columns(vec![
+                        crate::layout::Column::new(120.0),
+                        crate::layout::Column::new(120.0),
+                    ]);
+                if let Some(radius) = rounding {
+                    table = table.with_row_rounding(radius);
+                }
+                table.show_with_output(ui, |_, _, _, _| None).unwrap();
+            },
+        );
+        output.textures_delta.clear();
+        let mut fills: Vec<(f32, egui::CornerRadius)> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.fill == fill => {
+                    Some((rect.rect.left(), rect.corner_radius))
+                }
+                _ => None,
+            })
+            .collect();
+        fills.sort_by(|a, b| a.0.total_cmp(&b.0));
+        corners = fills.into_iter().map(|(_, corner)| corner).collect();
+    }
+    corners
+}
+
+#[test]
+fn a_row_s_outer_corners_can_be_rounded() {
+    let rounded = selected_corners(Some(6));
+    assert_eq!(rounded.len(), 2, "a fill per cell");
+    let left = egui::CornerRadius {
+        nw: 6,
+        sw: 6,
+        ne: 0,
+        se: 0,
+    };
+    let right = egui::CornerRadius {
+        nw: 0,
+        sw: 0,
+        ne: 6,
+        se: 6,
+    };
+    assert_eq!(rounded, vec![left, right]);
+    // Unset, square, as before.
+    assert!(
+        selected_corners(None)
+            .iter()
+            .all(|corner| *corner == egui::CornerRadius::ZERO)
+    );
+}

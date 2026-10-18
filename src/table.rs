@@ -21,6 +21,7 @@ pub struct TableKit<'a> {
     selected_hover_color: Option<egui::Color32>,
     selected_text_color: Option<egui::Color32>,
     focus_outline: bool,
+    row_rounding: u8,
     header: bool,
     max_height: Option<f32>,
     max_rows: Option<u64>,
@@ -51,6 +52,7 @@ impl<'a> TableKit<'a> {
             selected_hover_color: None,
             selected_text_color: None,
             focus_outline: true,
+            row_rounding: 0,
             header: true,
             max_height: Some(400.0), // Default limit fallback
             max_rows: None,
@@ -167,6 +169,15 @@ impl<'a> TableKit<'a> {
     #[must_use]
     pub const fn with_focus_outline(mut self, outline: bool) -> Self {
         self.focus_outline = outline;
+        self
+    }
+
+    /// Set the radius of a row's outer corners (its first cell's left ones, its last cell's
+    /// right ones), where its selection, hover, highlight, or stripe is filled: rows inside a
+    /// rounded container can follow its corners. Square (0) by default, as before.
+    #[must_use]
+    pub const fn with_row_rounding(mut self, radius: u8) -> Self {
+        self.row_rounding = radius;
         self
     }
 
@@ -328,6 +339,7 @@ impl<'a> TableKit<'a> {
             delegate.selected_hover_color = self.selected_hover_color;
             delegate.selected_text_color = self.selected_text_color;
             delegate.focus_outline = self.focus_outline;
+            delegate.row_rounding = self.row_rounding;
             delegate.drag_enabled = self.drag_enabled;
             delegate.column_map = self.column_map;
             delegate.track_events = track_events;

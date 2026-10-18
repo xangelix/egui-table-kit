@@ -47,6 +47,8 @@ pub struct TableKitDelegate<'a> {
     pub selected_text_color: Option<Color32>,
     /// Whether the focused row's cells are outlined.
     pub focus_outline: bool,
+    /// The radius of a row's outer corners where it is filled; 0 is square.
+    pub row_rounding: u8,
 
     /// Opt-in drag sensing; existing consumers keep click-only interaction.
     pub drag_enabled: bool,
@@ -62,6 +64,27 @@ pub struct TableKitDelegate<'a> {
 }
 
 impl<'a> TableKitDelegate<'a> {
+    /// A cell's corners that are its row's outer ones (the first column's left, the last's
+    /// right), rounded by `row_rounding`; the others square, so a row's fill stays whole.
+    fn row_corners(&self, layout_col: usize) -> egui::CornerRadius {
+        let radius = self.row_rounding;
+        if radius == 0 {
+            return egui::CornerRadius::ZERO;
+        }
+        let columns = self
+            .column_map
+            .as_ref()
+            .map_or_else(|| self.provider.column_count(), Vec::len);
+        let left = if layout_col == 0 { radius } else { 0 };
+        let right = if layout_col + 1 >= columns { radius } else { 0 };
+        egui::CornerRadius {
+            nw: left,
+            sw: left,
+            ne: right,
+            se: right,
+        }
+    }
+
     /// Creates a new delegate instance with robust visual defaults.
     #[expect(
         clippy::too_many_arguments,
@@ -102,6 +125,7 @@ impl<'a> TableKitDelegate<'a> {
             selected_hover_color: None,
             selected_text_color: None,
             focus_outline: true,
+            row_rounding: 0,
             drag_enabled: false,
             track_events: false,
             track_geometry: false,
@@ -197,6 +221,7 @@ impl TableDelegate for TableKitDelegate<'_> {
 
     fn cell_ui(&mut self, ui: &mut Ui, cell: &CellInfo) {
         let layout_col_nr = cell.col_nr;
+        let corners = self.row_corners(layout_col_nr);
         let mapped;
         let cell = match &self.column_map {
             Some(map) => {
@@ -242,14 +267,10 @@ impl TableDelegate for TableKitDelegate<'_> {
 
         // Paint background layers
         if is_selected {
-            ui.painter().rect_filled(
-                cell_rect,
-                egui::CornerRadius::ZERO,
-                ui.visuals().selection.bg_fill,
-            );
+            ui.painter()
+                .rect_filled(cell_rect, corners, ui.visuals().selection.bg_fill);
             if row_hovered && let Some(overlay) = self.selected_hover_color {
-                ui.painter()
-                    .rect_filled(cell_rect, egui::CornerRadius::ZERO, overlay);
+                ui.painter().rect_filled(cell_rect, corners, overlay);
             }
         } else {
             // 1. Base layer
@@ -265,8 +286,7 @@ impl TableDelegate for TableKitDelegate<'_> {
             };
 
             if let Some(color) = base_color {
-                ui.painter()
-                    .rect_filled(cell_rect, egui::CornerRadius::ZERO, color);
+                ui.painter().rect_filled(cell_rect, corners, color);
             }
 
             // 2. Hover layer
@@ -275,8 +295,7 @@ impl TableDelegate for TableKitDelegate<'_> {
                     .hover_color
                     .unwrap_or_else(|| ui.visuals().widgets.hovered.weak_bg_fill);
 
-                ui.painter()
-                    .rect_filled(cell_rect, egui::CornerRadius::ZERO, hover_fill);
+                ui.painter().rect_filled(cell_rect, corners, hover_fill);
             }
         }
 
