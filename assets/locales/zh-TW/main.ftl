@@ -40,3 +40,7 @@ deselect-filtered = 取消選取已篩選項目
 
 select-all = 全選
 deselect-all = 取消全選
+
+# Lazy cells
+cell-loading = 載入中
+cell-failed = 失敗

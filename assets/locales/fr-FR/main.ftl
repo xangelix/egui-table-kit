@@ -40,3 +40,7 @@ deselect-filtered = Désélectionner les éléments filtrés
 
 select-all = Tout sélectionner
 deselect-all = Tout désélectionner
+
+# Lazy cells
+cell-loading = Chargement
+cell-failed = Échec

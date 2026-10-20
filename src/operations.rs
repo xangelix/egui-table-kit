@@ -1,12 +1,20 @@
 //! Table management actions and toolbar operations frameworks.
 
-use std::{borrow::Cow, collections::HashSet};
+use std::{
+    borrow::Cow,
+    collections::HashSet,
+    ops::{Range, RangeInclusive},
+};
 
 use compact_str::{CompactString, ToCompactString as _};
 use fluent_zero::t;
-use roaring::RoaringBitmap;
+use roaring::RoaringTreemap;
 
-use super::{error::TableError, filter::Filter, state::TableState};
+use super::{
+    error::TableError,
+    filter::Filter,
+    state::{ActiveRowsIter, TableState, row_bit, row_bits},
+};
 
 /// Represents cell data, providing the primary text and an optional tooltip/hover override.
 pub type TableCell<'a> = (Cow<'a, str>, Option<Cow<'a, str>>);
@@ -93,6 +101,120 @@ pub struct RowHierarchy {
     pub is_expanded: bool,
 }
 
+/// What a table is about to draw in one show pass, given to [`TableProvider::prepare`].
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Viewport<'a> {
+    /// The visible indices drawn: positions in [`TableState::active_rows`].
+    pub visible: Range<u64>,
+    /// The provider rows at those visible indices, in order.
+    pub rows: VisibleRows<'a>,
+    /// The provider columns drawn: the sticky ones, then the visible range, each through the
+    /// table's column map.
+    pub columns: &'a [usize],
+}
+
+impl<'a> Viewport<'a> {
+    /// A viewport, for instance to test a provider's [`TableProvider::prepare`].
+    #[must_use]
+    pub const fn new(visible: Range<u64>, rows: VisibleRows<'a>, columns: &'a [usize]) -> Self {
+        Self {
+            visible,
+            rows,
+            columns,
+        }
+    }
+}
+
+/// The provider rows at a range of visible indices, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VisibleRows<'a> {
+    /// The rows are their visible indices (every row is shown, in order): these rows.
+    Identity(Range<usize>),
+    /// The provider row at each visible index.
+    Mapped(&'a [usize]),
+}
+
+impl<'a> VisibleRows<'a> {
+    /// How many rows there are.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Identity(rows) => rows.len(),
+            Self::Mapped(rows) => rows.len(),
+        }
+    }
+
+    /// Whether there are none.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The provider row at position `index` of these rows.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<usize> {
+        match self {
+            Self::Identity(rows) => rows.clone().nth(index),
+            Self::Mapped(rows) => rows.get(index).copied(),
+        }
+    }
+
+    /// The provider rows, in order.
+    #[must_use]
+    pub fn iter(&self) -> ActiveRowsIter<'a> {
+        match self {
+            Self::Identity(rows) => ActiveRowsIter::identity(rows.clone()),
+            Self::Mapped(rows) => ActiveRowsIter::mapped(rows),
+        }
+    }
+
+    /// The lowest and highest provider row among them, if any: at once for
+    /// [`Self::Identity`], by a pass over the rows otherwise.
+    #[must_use]
+    pub fn span(&self) -> Option<RangeInclusive<usize>> {
+        match self {
+            Self::Identity(rows) => (!rows.is_empty()).then(|| rows.start..=rows.end - 1),
+            Self::Mapped(rows) => {
+                let low = rows.iter().min()?;
+                let high = rows.iter().max()?;
+                Some(*low..=*high)
+            }
+        }
+    }
+}
+
+impl<'a> IntoIterator for VisibleRows<'a> {
+    type Item = usize;
+    type IntoIter = ActiveRowsIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &VisibleRows<'a> {
+    type Item = usize;
+    type IntoIter = ActiveRowsIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Whether a cell's value can be drawn yet, from [`TableProvider::cell_status`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CellStatus<'a> {
+    /// The value is there: the table asks [`TableProvider::cell_at`] for it.
+    #[default]
+    Ready,
+    /// The value is on its way: the table draws a placeholder.
+    Loading,
+    /// The value couldn't be had: the table draws a short error, with this message on hover.
+    Failed(Cow<'a, str>),
+}
+
 /// Zero-allocation lazy headers iterator.
 pub struct HeaderIter<'a> {
     provider: &'a dyn TableProvider,
@@ -164,6 +286,18 @@ impl Row for BorrowedRow<'_> {
 }
 
 /// Trait implemented by datasets to back the interactive table system.
+///
+/// ## Lazy tables
+///
+/// A provider whose rows aren't all in memory (a file of billions of rows read as the user
+/// scrolls) says so with [`Self::is_lazy`], and loads what is drawn: [`Self::prepare`] is told
+/// the rows and columns of each show pass before any cell is asked for, and
+/// [`Self::cell_status`] says which cells are still [`CellStatus::Loading`] (drawn as a
+/// placeholder) or [`CellStatus::Failed`]; only [`CellStatus::Ready`] cells are asked for with
+/// [`Self::cell_at`]. The table doesn't repaint by itself while cells load: request a repaint
+/// ([`egui::Context::request_repaint`]) when data arrives. Columns that can't be sorted or
+/// filtered without reading every row say so with [`Self::can_sort`] and [`Self::can_filter`],
+/// which hides those controls.
 pub trait TableProvider {
     /// Stable identity within this table. Override when physical row indices can change.
     /// Keys must be unique and must not be reused for a different logical row.
@@ -172,6 +306,38 @@ pub trait TableProvider {
     }
 
     fn row_selectable(&self, _row_index: usize) -> bool {
+        true
+    }
+
+    /// Called once per show pass, before any [`Self::cell_at`] or [`Self::cell_status`], with
+    /// what is about to be drawn: start loading it here. A full sizing pass (columns fitted to
+    /// their contents) gives every column; a lazy provider's gives at most a few hundred rows.
+    fn prepare(&self, _view: &Viewport<'_>) {}
+
+    /// Whether a cell's value can be drawn yet. Only a [`CellStatus::Ready`] cell is asked for
+    /// with [`Self::cell_at`] (and given to a custom cell renderer); a loading cell is drawn as a
+    /// placeholder, and a failed one as a short error with the message on hover. Rows are
+    /// selected and clicked alike, whatever their cells' status. Ready by default.
+    fn cell_status(&self, _row_index: usize, _col_index: usize) -> CellStatus<'_> {
+        CellStatus::Ready
+    }
+
+    /// Whether the rows aren't all in memory, so the table must only touch the rows drawn: a
+    /// full sizing pass then lays out at most the visible rows (a few hundred), never all of
+    /// them. `false` by default.
+    fn is_lazy(&self) -> bool {
+        false
+    }
+
+    /// Whether the column can be sorted ([`Self::sort_active_rows`]). The header hides its sort
+    /// control for a column that can't, and the table never sorts by it. `true` by default.
+    fn can_sort(&self, _col_index: usize) -> bool {
+        true
+    }
+
+    /// Whether the column can be filtered ([`Self::filter_rows`]). The header hides its filter
+    /// controls for a column that can't, and the table never filters by it. `true` by default.
+    fn can_filter(&self, _col_index: usize) -> bool {
         true
     }
 
@@ -258,12 +424,12 @@ pub trait TableProvider {
             return Ok(());
         }
 
-        let active_set: RoaringBitmap = active_rows.iter().map(|&i| i as u32).collect();
+        let active_set: RoaringTreemap = active_rows.iter().map(|&i| i as u64).collect();
         let mut sort_keys = Vec::with_capacity(active_rows.len());
 
         let mut idx = 0usize;
         self.for_all_rows(&mut |row| {
-            if active_set.contains(idx as u32) {
+            if active_set.contains(idx as u64) {
                 let val = row
                     .cell(col_index)
                     .map(|(v, _)| v.to_compact_string())
@@ -285,6 +451,9 @@ pub trait TableProvider {
     }
 
     /// Filters all rows sequentially. Override this to implement custom parallel filtering (e.g. Rayon).
+    ///
+    /// The table calls it only with at least one filter, each on a column the provider can filter
+    /// ([`Self::can_filter`]); with none, every row is shown in order without asking.
     fn filter_rows(
         &self,
         state: &TableState,
@@ -1054,8 +1223,15 @@ impl TableOperation for FilterSelectAll {
         TableOperationEnablement::Always
     }
     fn exec(&mut self, ctx: &mut OperationContext<'_, '_>) -> Result<(), TableError> {
-        let active_u32_iter = ctx.data.active_rows.iter().map(|&row| row as u32);
-        ctx.data.selected_rows.extend(active_u32_iter);
+        let data = &mut *ctx.data;
+        if data.active_rows.is_identity() {
+            if let Some(bits) = row_bits(data.active_rows.len()) {
+                data.selected_rows.insert_range(bits);
+            }
+        } else {
+            let bits = data.active_rows.iter().filter_map(row_bit);
+            data.selected_rows.extend(bits);
+        }
         Ok(())
     }
 }
@@ -1074,9 +1250,16 @@ impl TableOperation for FilterDeSelectAll {
         TableOperationEnablement::Always
     }
     fn exec(&mut self, ctx: &mut OperationContext<'_, '_>) -> Result<(), TableError> {
-        ctx.data.active_rows.iter().for_each(|row| {
-            ctx.data.selected_rows.remove(*row as u32);
-        });
+        let data = &mut *ctx.data;
+        if data.active_rows.is_identity() {
+            if let Some(bits) = row_bits(data.active_rows.len()) {
+                data.selected_rows.remove_range(bits);
+            }
+        } else {
+            for bit in data.active_rows.iter().filter_map(row_bit) {
+                data.selected_rows.remove(bit);
+            }
+        }
         Ok(())
     }
 }
@@ -1094,11 +1277,13 @@ impl TableOperation for SelectAll {
     fn enabled(&self) -> TableOperationEnablement {
         TableOperationEnablement::Always
     }
+    /// Selects every row the bitmaps hold: the first `2^32` (see
+    /// [`crate::state::BITMAP_ROWS`]).
     fn exec(&mut self, ctx: &mut OperationContext<'_, '_>) -> Result<(), TableError> {
         ctx.data.selected_rows.clear();
-        ctx.data
-            .selected_rows
-            .insert_range(0..ctx.provider.row_count() as u32);
+        if let Some(bits) = row_bits(ctx.provider.row_count()) {
+            ctx.data.selected_rows.insert_range(bits);
+        }
         Ok(())
     }
 }

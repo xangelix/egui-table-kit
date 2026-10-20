@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 pub struct Highlights(pub [RoaringBitmap; 10]);
 
 impl Highlights {
-    /// Accesses the highlight color index assigned to the row (if any).
+    /// Accesses the highlight color index assigned to the row (if any). A row past the bitmaps
+    /// ([`crate::state::BITMAP_ROWS`]) is never highlighted.
     #[must_use]
     pub fn get_usize(&self, index: usize) -> Option<u8> {
-        self.get(index as u32)
+        crate::state::row_bit(index).and_then(|bit| self.get(bit))
     }
 
     /// Adds a row index to a specific highlight color group.

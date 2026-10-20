@@ -9,7 +9,8 @@
 - **Text Search & Regex Filtering**: Advanced per-column text filters supporting raw literal substrings, case insensitivity, and regular expressions with integrated error feedback for invalid regex patterns.
 - **Color Highlighting & Tagging**: Categorize rows into up to 10 color-based highlight groups (backed by compressed bitmaps) and filter rows matching specific colors.
 - **Hierarchical Tree Support**: Native rendering of nested trees, custom guideline drawing with dashed line segments, parent-child expansion/collapse toggle buttons, and cached subtree flattening.
-- **Optimized Selection Storage**: Selection state tracking utilizing `roaring` bitmaps for efficient range queries and multi-gigabyte row scale memory footprint.
+- **Optimized Selection Storage**: Selection state tracking utilizing `roaring` bitmaps for efficient range queries and a small memory footprint at any scale (the bitmaps hold rows `0..2^32`; see [Lazy tables](#lazy-tables)).
+- **Lazy Tables**: Billions of rows that aren't in memory, loaded as the user scrolls: the provider is told what each frame draws, cells can be loading or failed, and nothing walks every row.
 - **Convenience Extractors (`RowSliceExt`)**: Simple helper trait on raw row data to parse, extract, or fall back between primary cell text and optional alternate/hover text.
 - **Action Dispatch Framework (`TableOperations`)**: Build toolbar button groups or context menus bound to row selection limits. Built-in support for long-running operations via poll loops, modal dialogues, progress spinners, and operation errors.
 - **Default Actions**: Shipped out-of-the-box with operations for select all, deselect all, filter-based selections, and clipboard-copy utilities (with and without header data).
@@ -22,9 +23,9 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-egui = "0.34"
-egui_extras = { version = "0.34", default-features = false }
-egui-table-kit = "0.1.0"
+egui = "0.36"
+egui_extras = { version = "0.36", default-features = false }
+egui-table-kit = "0.8"
 ```
 
 ---
@@ -66,6 +67,21 @@ pub trait TableProvider {
         filters: &[(usize, Filter)],
     ) -> Result<Vec<usize>, TableError>;
 
+    // --- Lazy Table Methods (see "Lazy tables" below) ---
+
+    /// Called once per show pass, before any cell is asked for, with what is drawn.
+    fn prepare(&self, _view: &Viewport<'_>) {}
+
+    /// Whether a cell's value can be drawn yet (only ready cells are asked for).
+    fn cell_status(&self, _row: usize, _col: usize) -> CellStatus<'_> { CellStatus::Ready }
+
+    /// Whether the rows aren't all in memory.
+    fn is_lazy(&self) -> bool { false }
+
+    /// Whether a column can be sorted or filtered (its controls are hidden if not).
+    fn can_sort(&self, _col: usize) -> bool { true }
+    fn can_filter(&self, _col: usize) -> bool { true }
+
     // --- Hierarchical Tree Table Methods ---
 
     /// Returns the tree structural context for a row. Defaults to None (flat table).
@@ -97,7 +113,7 @@ pub trait TableProvider {
 
 - The persistent table ID.
 - Dynamic column states (hover highlights, active search criteria, and active sort orientations).
-- Row indices matching active filters (`active_rows`).
+- The rows shown, in order (`active_rows`, an `ActiveRows`): `ActiveRows::All(n)` while every row is shown in the provider's order (no list, however many rows), or `ActiveRows::Rows(list)` once filtered, sorted, or flattened from a tree.
 - Selected and expanded nodes (powered by `RoaringBitmap`).
 - Tree guidelines and expansion toggle state indicators.
 - Caches for sibling sorting to minimize CPU overhead on frame redraws.
@@ -265,7 +281,7 @@ impl eframe::App for DemoApp {
                 // Apply active column sorting
                 if let Some((sort_col, sort_up)) = self.state.get_sort_state() {
                     let _ = self.provider.sort_active_rows(
-                        &mut self.state.active_rows,
+                        self.state.active_rows.to_mut(),
                         sort_col,
                         sort_up,
                     );
@@ -274,8 +290,8 @@ impl eframe::App for DemoApp {
                 let active_rows = self.state.active_rows.clone();
 
                 table.body(|mut body| {
-                    for &row_idx in &active_rows {
-                        let is_selected = self.state.selected_rows.contains(row_idx as u32);
+                    for row_idx in &active_rows {
+                        let is_selected = self.state.is_selected(row_idx);
                         body.row(18.0, |mut row| {
                             for col_idx in 0..self.provider.column_count() {
                                 row.col(|ui| {
@@ -302,6 +318,27 @@ impl eframe::App for DemoApp {
     }
 }
 ```
+
+---
+
+## Lazy tables
+
+A provider whose rows aren't all in memory (a Parquet file of billions of rows read as the user scrolls) renders through `TableKit` as any other. Only the rows and columns in view are touched:
+
+- **No per-row state.** `TableState::new(id, row_count)` holds every row as `ActiveRows::All(row_count)`, without a list. Filtering, sorting, and flattening a tree make a list (`ActiveRows::Rows`); clearing the filters and the sort of a flat table returns to `All`. Read it with `get`, `position` (immediate for `All`), `iter`, and `iter_range`; take a list to change with `to_mut()`, which makes one from `All`:
+
+  ```rust
+  provider.sort_active_rows(state.active_rows.to_mut(), column, ascending)?;
+  ```
+
+- **Say what is drawn.** `TableProvider::prepare(&Viewport)` is called once per show pass, before any cell is asked for, with the visible indices (`visible`), the provider rows at them (`rows`: `VisibleRows::Identity(range)` or `VisibleRows::Mapped(&[usize])`; `span()` gives the lowest and highest), and the provider columns drawn (`columns`: sticky ones, then the visible range, through the column map). Start loading there.
+- **Draw what isn't there yet.** `TableProvider::cell_status(row, col)` returns `CellStatus::Ready`, `Loading`, or `Failed(message)`. Only ready cells are asked for with `cell_at` (and given to a custom cell renderer). A loading cell is drawn as a faint bar, a failed one as a short error with the message on hover; both are labelled for screen readers, and their rows are selected and clicked like any other. The table doesn't repaint on its own while cells load: call `Context::request_repaint` when data arrives.
+- **Never walk every row.** `TableProvider::is_lazy() -> true` limits the first frame's full sizing pass (columns fitted to their contents) to the visible rows, at most `LAZY_SIZING_ROWS` (256; `TableKit::with_max_sizing_rows` or `layout::Table::max_sizing_rows` set it explicitly). Columns that can't be sorted or filtered without reading every row return `false` from `can_sort`/`can_filter`: the header hides those controls and the table never sorts or filters by them. A lazy provider's rows aren't searched for a row's key either (keyboard focus falls back to the first row instead).
+- **Rows past 2^32.** Selection, expansion, highlights, and a tree's filter matches are `RoaringBitmap`s of `u32`, so they hold rows `0..2^32` (`state::BITMAP_ROWS`). A row past them is never selected, highlighted, or expanded (selecting it does nothing; Select All selects the first 2^32) and is never taken for another row: every bitmap access goes through `state::row_bit(row) -> Option<u32>`. `TableState::is_selected(row)` and `is_expanded(row)` answer for any row.
+
+`examples/lazy.rs` shows a billion rows of sixty columns served in 1,024-row blocks by a loader thread (`cargo run --release --example lazy`).
+
+Upgrading from 0.7: `TableState::active_rows` is an `ActiveRows`, not a `Vec<usize>`. Where a `&mut Vec<usize>` was taken (to sort it), use `state.active_rows.to_mut()`; `active_rows.get(i)` returns `Option<usize>`; build one from a list with `vec![…].into()`. The provider's new methods all have defaults. `TableProvider::filter_rows` is no longer called with an empty filter list: every row is then shown in order.
 
 ---
 

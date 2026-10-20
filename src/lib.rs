@@ -11,5 +11,7 @@ pub mod table;
 
 #[cfg(test)]
 mod interaction_tests;
+#[cfg(test)]
+mod lazy_tests;
 
 include!(concat!(env!("OUT_DIR"), "/static_cache.rs"));

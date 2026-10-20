@@ -40,3 +40,7 @@ deselect-filtered = फ़िल्टर किए गए को अचयन�
 
 select-all = सभी चुनें
 deselect-all = सभी को अचयनित करें
+
+# Lazy cells
+cell-loading = लोड हो रहा है
+cell-failed = विफल

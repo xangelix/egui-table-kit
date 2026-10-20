@@ -40,3 +40,7 @@ deselect-filtered = フィルタ結果の選択を解除
 
 select-all = すべて選択
 deselect-all = すべて選択解除
+
+# Lazy cells
+cell-loading = 読み込み中
+cell-failed = 失敗

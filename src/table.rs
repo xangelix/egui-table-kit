@@ -6,6 +6,9 @@ use crate::{
     state::TableState,
 };
 
+/// How many rows a full sizing pass lays out for a lazy provider ([`TableProvider::is_lazy`]).
+pub const LAZY_SIZING_ROWS: u64 = 256;
+
 pub struct TableKit<'a> {
     id: String,
     provider: &'a dyn TableProvider,
@@ -29,6 +32,7 @@ pub struct TableKit<'a> {
     auto_size_mode: crate::layout::AutoSizeMode,
     drag_enabled: bool,
     column_map: Option<Vec<usize>>,
+    max_sizing_rows: Option<u64>,
 }
 
 impl<'a> TableKit<'a> {
@@ -60,6 +64,7 @@ impl<'a> TableKit<'a> {
             auto_size_mode: crate::layout::AutoSizeMode::OnParentResize,
             drag_enabled: false,
             column_map: None,
+            max_sizing_rows: None,
         }
     }
 
@@ -189,6 +194,16 @@ impl<'a> TableKit<'a> {
         self
     }
 
+    /// Limits the rows a full sizing pass (the first frame of a table with auto-fitted columns)
+    /// lays out to at most `rows` of the visible ones (see
+    /// [`crate::layout::Table::max_sizing_rows`]). Unset, a lazy provider's table lays out at
+    /// most [`LAZY_SIZING_ROWS`], any other every row, as before.
+    #[must_use]
+    pub const fn with_max_sizing_rows(mut self, rows: u64) -> Self {
+        self.max_sizing_rows = Some(rows);
+        self
+    }
+
     /// Select/reorder provider columns. Custom cell callbacks receive provider column indices.
     #[must_use]
     pub fn with_column_map(mut self, columns: Vec<usize>) -> Self {
@@ -289,9 +304,13 @@ impl<'a> TableKit<'a> {
                 .collect::<Vec<_>>()
         });
 
+        let max_sizing_rows = self
+            .max_sizing_rows
+            .or_else(|| self.provider.is_lazy().then_some(LAZY_SIZING_ROWS));
         let mut table = crate::layout::Table::new()
             .id_salt(&self.id)
             .num_rows(self.state.active_rows.len() as u64)
+            .max_sizing_rows(max_sizing_rows)
             .columns(columns)
             .auto_size_mode(self.auto_size_mode) // <--- Forward auto-size mode
             .headers(if self.header {

@@ -40,3 +40,7 @@ deselect-filtered = 필터링된 항목 선택 해제
 
 select-all = 전체 선택
 deselect-all = 전체 선택 해제
+
+# Lazy cells
+cell-loading = 불러오는 중
+cell-failed = 실패

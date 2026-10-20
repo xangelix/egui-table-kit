@@ -1,11 +1,14 @@
 use egui::{Color32, Margin, Response, Sense, Ui};
+use fluent_zero::t;
 
 use super::{
     error::TableError,
     filter::highlight::select_color,
-    header::{ColResponse, HeaderMenuAnchor, show_header_cell_contents, text_row},
+    header::{
+        ColResponse, HeaderControls, HeaderMenuAnchor, show_header_cell_with_controls, text_row,
+    },
     layout::{CellInfo, HeaderCellInfo, PrefetchInfo, TableDelegate},
-    operations::{BorrowedRow, Row, TableProvider},
+    operations::{BorrowedRow, CellStatus, Row, TableProvider, Viewport},
     state::TableState,
 };
 use crate::interaction::{RowEvent, RowEventKind, RowGeometry, SelectionInput};
@@ -153,13 +156,33 @@ impl TableDelegate for TableKitDelegate<'_> {
         self.row_height
     }
 
-    fn prepare(&mut self, _info: &PrefetchInfo) {
+    fn prepare(&mut self, info: &PrefetchInfo) {
         if self.is_new_pass {
             self.is_new_pass = false;
             self.collected_responses.clear();
             self.hovered_row = None;
             self.events.clear();
             self.rows.clear();
+
+            // Tell the provider what this pass draws, before any cell is asked for.
+            let column_count = self.provider.column_count();
+            let columns: Vec<usize> = (0..info.num_sticky_columns)
+                .chain(info.visible_columns.clone())
+                .filter_map(|layout_col| match &self.column_map {
+                    Some(map) => map.get(layout_col).copied(),
+                    None => Some(layout_col),
+                })
+                .filter(|&column| column < column_count)
+                .collect();
+            let shown = self.state.active_rows.len();
+            let to_index = |row: u64| usize::try_from(row).map_or(shown, |row| row.min(shown));
+            let start = to_index(info.visible_rows.start);
+            let end = to_index(info.visible_rows.end).max(start);
+            self.provider.prepare(&Viewport {
+                visible: start as u64..end as u64,
+                rows: self.state.active_rows.slice(start..end),
+                columns: &columns,
+            });
         }
     }
 
@@ -173,6 +196,10 @@ impl TableDelegate for TableKitDelegate<'_> {
             return;
         };
         let title = self.provider.header(col_idx).unwrap_or_default();
+        let controls = HeaderControls::new(
+            self.provider.can_sort(col_idx),
+            self.provider.can_filter(col_idx),
+        );
 
         let default_response = ColResponse::default();
         let (previous_response, sort_up) = self
@@ -195,7 +222,7 @@ impl TableDelegate for TableKitDelegate<'_> {
 
         // Isolate ID namespace per column to prevent sort/ellipsis widget ID collisions
         ui.push_id(col_idx, |ui| {
-            match show_header_cell_contents(
+            match show_header_cell_with_controls(
                 ui,
                 title.as_ref(),
                 &sort_up,
@@ -204,11 +231,21 @@ impl TableDelegate for TableKitDelegate<'_> {
                 self.user_colors,
                 self.header_menu_anchor,
                 self.cell_align,
+                controls,
             ) {
                 Ok(response) => {
-                    if col_idx >= self.collected_responses.len() {
-                        self.collected_responses
-                            .resize_with(col_idx + 1, ColResponse::default);
+                    // A column not drawn this pass (scrolled out of view, or left out of the
+                    // column map) keeps its filter: it has no header to change it.
+                    while self.collected_responses.len() <= col_idx {
+                        let column = self.collected_responses.len();
+                        let kept = self.state.columns.get(column).map_or_else(
+                            ColResponse::default,
+                            |state| ColResponse {
+                                filtering: state.response.filtering.clone(),
+                                ..ColResponse::default()
+                            },
+                        );
+                        self.collected_responses.push(kept);
                     }
                     self.collected_responses[col_idx] = response;
                 }
@@ -240,12 +277,14 @@ impl TableDelegate for TableKitDelegate<'_> {
             }
             None => cell,
         };
-        let current_visible_idx = cell.row_nr as usize;
-        let Some(&row_idx) = self.state.active_rows.get(current_visible_idx) else {
+        let Ok(current_visible_idx) = usize::try_from(cell.row_nr) else {
+            return;
+        };
+        let Some(row_idx) = self.state.active_rows.get(current_visible_idx) else {
             return;
         };
 
-        let is_selected = self.state.selected_rows.contains(row_idx as u32);
+        let is_selected = self.state.is_selected(row_idx);
         let highlight = self.state.highlights.get_usize(row_idx);
 
         let item_spacing = ui.spacing().item_spacing;
@@ -314,9 +353,7 @@ impl TableDelegate for TableKitDelegate<'_> {
             ui.ctx().request_repaint();
             if self.track_events {
                 let key = self.provider.row_key(row_idx);
-                let kind = RowEventKind::ExpansionChanged(
-                    self.state.expanded_rows.contains(row_idx as u32),
-                );
+                let kind = RowEventKind::ExpansionChanged(self.state.is_expanded(row_idx));
                 if self
                     .state
                     .accept_event(ui.ctx().cumulative_frame_nr(), key, kind)
@@ -398,7 +435,7 @@ impl TableDelegate for TableKitDelegate<'_> {
                         row.hit_regions.push(strip);
                     }
                 } else {
-                    let mut hit_regions = Vec::with_capacity(self.provider.column_count() + 1);
+                    let mut hit_regions = Vec::with_capacity(2);
                     if interact_clipped.is_positive() {
                         hit_regions.push(interact_clipped);
                     }
@@ -566,22 +603,42 @@ impl TableDelegate for TableKitDelegate<'_> {
             provider: self.provider,
             row_index: row_idx,
         };
-        let value = match borrowed_row.try_cell(cell.col_nr) {
-            Ok(value) => value,
-            Err(error) => {
-                *self.halt_error = Some(error);
-                return;
+        // Only a ready cell's value is asked for; a loading or failed one is drawn without it.
+        let status = self.provider.cell_status(row_idx, cell.col_nr);
+        let value = if matches!(status, CellStatus::Ready) {
+            match borrowed_row.try_cell(cell.col_nr) {
+                Ok(value) => value,
+                Err(error) => {
+                    *self.halt_error = Some(error);
+                    return;
+                }
             }
+        } else {
+            None
         };
-        if let Some((label, _)) = &value {
-            response.widget_info(|| {
-                egui::WidgetInfo::selected(
-                    egui::WidgetType::SelectableLabel,
-                    ui.is_enabled(),
-                    is_selected,
-                    label.as_ref(),
-                )
-            });
+        let widget_label = |label: &str| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::SelectableLabel,
+                ui.is_enabled(),
+                is_selected,
+                label,
+            )
+        };
+        match &status {
+            CellStatus::Loading => response.widget_info(|| widget_label(&t!("cell-loading"))),
+            CellStatus::Failed(message) => {
+                response.widget_info(|| widget_label(&format!("{}: {message}", t!("cell-failed"))))
+            }
+            _ => {
+                if let Some((label, _)) = &value {
+                    response.widget_info(|| widget_label(label.as_ref()));
+                }
+            }
+        }
+        if let CellStatus::Failed(message) = &status
+            && !ui.is_sizing_pass()
+        {
+            response.on_hover_text(message.as_ref());
         }
         if self.focus_outline && self.state.focused_key == Some(key) {
             let clipped = cell_rect.intersect(ui.clip_rect());
@@ -607,6 +664,27 @@ impl TableDelegate for TableKitDelegate<'_> {
         // Wrap everything inside an inner-margin Frame to provide clean cell margins
         egui::Frame::NONE.inner_margin(padding).show(ui, |ui| {
             ui.push_id((cell.row_nr, cell.col_nr), |ui| {
+                match &status {
+                    CellStatus::Ready => {}
+                    CellStatus::Failed(_) => {
+                        text_row(ui, self.cell_align, |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(t!("cell-failed"))
+                                        .color(ui.visuals().error_fg_color),
+                                )
+                                .selectable(false)
+                                .wrap_mode(egui::TextWrapMode::Truncate),
+                            );
+                        });
+                        return;
+                    }
+                    _ => {
+                        loading_placeholder(ui, text_color);
+                        return;
+                    }
+                }
+
                 let custom_renderer = self.custom_cell_ui.as_mut();
 
                 if let Some(renderer) = custom_renderer
@@ -630,5 +708,26 @@ impl TableDelegate for TableKitDelegate<'_> {
                 }
             });
         });
+    }
+}
+
+/// A loading cell's placeholder: a faint rounded bar across about 60% of the cell, centred on
+/// its height. It takes no room, so it doesn't widen columns fitted to their contents.
+fn loading_placeholder(ui: &Ui, text_color: Color32) {
+    if ui.is_sizing_pass() {
+        return;
+    }
+    let rect = ui.max_rect();
+    let height = (ui.text_style_height(&egui::TextStyle::Body) * 0.55)
+        .min(rect.height())
+        .max(2.0);
+    let bar = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.center().y - height / 2.0),
+        egui::vec2(rect.width() * 0.6, height),
+    );
+    if bar.is_positive() {
+        let radius = (height / 2.0).round().clamp(0.0, f32::from(u8::MAX)) as u8;
+        ui.painter()
+            .rect_filled(bar, radius, text_color.gamma_multiply(0.18));
     }
 }

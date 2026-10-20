@@ -322,7 +322,9 @@ impl eframe::App for TableApp {
                       cell_info: &egui_table_kit::layout::CellInfo,
                       row_data: &dyn Row,
                       text_color: egui::Color32| {
-                    let row_idx = active_rows[cell_info.row_nr as usize];
+                    let row_idx = usize::try_from(cell_info.row_nr)
+                        .ok()
+                        .and_then(|visible| active_rows.get(visible))?;
 
                     let tag_color = if let Some(color_idx) = highlights.get_usize(row_idx)
                         && let Ok(rgb) = select_color(color_idx, &org_colors, &user_colors)
@@ -414,9 +416,11 @@ impl eframe::App for TableApp {
             let mut click_anchor: Option<egui::Pos2> = ui.data_mut(|d| d.get_temp(anchor_pos_id));
 
             if let Some(row_idx) = secondary_clicked {
-                if !state.selected_rows.contains(row_idx as u32) {
+                if !state.is_selected(row_idx)
+                    && let Some(bit) = egui_table_kit::state::row_bit(row_idx)
+                {
                     state.selected_rows.clear();
-                    state.selected_rows.insert(row_idx as u32);
+                    state.selected_rows.insert(bit);
                 }
                 if let Some(pos) = ui.ctx().pointer_latest_pos() {
                     ui.data_mut(|d| d.insert_temp(anchor_pos_id, pos));
