@@ -45,6 +45,8 @@ struct Recording {
     filterable: fn(usize) -> bool,
     calls: RefCell<Vec<Call>>,
     keys: Cell<usize>,
+    /// The columns whose header tooltip was asked for, in order.
+    tooltips: RefCell<Vec<usize>>,
 }
 
 impl Recording {
@@ -58,6 +60,7 @@ impl Recording {
             filterable: |_| true,
             calls: RefCell::new(Vec::new()),
             keys: Cell::new(0),
+            tooltips: RefCell::new(Vec::new()),
         }
     }
 
@@ -103,6 +106,11 @@ impl TableProvider for Recording {
 
     fn headers(&self) -> HeaderIter<'_> {
         HeaderIter::new(self)
+    }
+
+    fn header_tooltip(&self, index: usize) -> Option<Cow<'_, str>> {
+        self.tooltips.borrow_mut().push(index);
+        (index != 2).then(|| Cow::Owned(format!("About column {index}")))
     }
 
     fn row_count(&self) -> usize {
@@ -1014,4 +1022,131 @@ fn every_column_sticky_still_prepares_before_its_cells() {
     output.textures_delta.clear();
     assert_eq!(order.calls, ["prepare", "cell"]);
     assert!(order.cells.get() > 0);
+}
+
+/// Where `wanted` is drawn among `shapes`, if it is.
+fn drawn_at(shapes: &[egui::epaint::ClippedShape], wanted: &str) -> Option<egui::Rect> {
+    fn find(shape: &egui::Shape, wanted: &str) -> Option<egui::Rect> {
+        match shape {
+            egui::Shape::Text(text) if text.galley.text() == wanted => {
+                Some(text.visual_bounding_rect())
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().find_map(|shape| find(shape, wanted)),
+            _ => None,
+        }
+    }
+    shapes
+        .iter()
+        .find_map(|clipped| find(&clipped.shape, wanted))
+}
+
+#[test]
+fn sticky_columns_stay_in_place_and_are_prepared_first() {
+    let ctx = egui::Context::default();
+    let provider = Recording::lazy(100, 8);
+    let mut state = TableState::new("sticky", 100);
+    // Provider column 7 is shown first, and stays while the others scroll.
+    fn configure(table: TableKit<'_>) -> TableKit<'_> {
+        table
+            .with_columns((0..8).map(|_| crate::layout::Column::new(120.0)).collect())
+            .with_column_map(vec![7, 0, 1, 2, 3, 4, 5, 6])
+            .with_sticky_columns(1)
+    }
+    let (_, full) = show(&ctx, &provider, &mut state, 0.0, vec![], configure);
+    let sticky_x = drawn_at(&full.shapes, "r1c7")
+        .expect("sticky cell drawn")
+        .left();
+    let first_x = drawn_at(&full.shapes, "r1c0")
+        .expect("first column drawn")
+        .left();
+    assert!(sticky_x < first_x);
+    let Some(Call::Prepare { columns, .. }) = provider.prepares().last().cloned() else {
+        panic!("prepared");
+    };
+    assert_eq!(columns.first(), Some(&7), "{columns:?}");
+
+    // Scroll sideways past the first scrolling columns.
+    let over = egui::pos2(300.0, 150.0);
+    let wheel = vec![
+        Event::PointerMoved(over),
+        Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(-400.0, 0.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        },
+    ];
+    let mut full = full;
+    for frame in 1..12 {
+        let events = if frame == 1 { wheel.clone() } else { vec![] };
+        full = show(
+            &ctx,
+            &provider,
+            &mut state,
+            f64::from(frame) * 0.1,
+            events,
+            configure,
+        )
+        .1;
+    }
+    assert!(drawn_at(&full.shapes, "r1c0").is_none(), "scrolled out");
+    let still = drawn_at(&full.shapes, "r1c7").expect("sticky cell still drawn");
+    assert!((still.left() - sticky_x).abs() < 0.5, "{still:?}");
+    let Some(Call::Prepare { columns, .. }) = provider.prepares().last().cloned() else {
+        panic!("prepared");
+    };
+    assert_eq!(columns.first(), Some(&7), "{columns:?}");
+    assert!(!columns.contains(&0), "{columns:?}");
+}
+
+#[test]
+fn header_tooltips_are_asked_for_only_while_hovered() {
+    let ctx = egui::Context::default();
+    let provider = Recording::lazy(100, 3);
+    let mut state = TableState::new("tooltips", 100);
+    fn configure(table: TableKit<'_>) -> TableKit<'_> {
+        table.with_columns((0..3).map(|_| crate::layout::Column::new(120.0)).collect())
+    }
+    let (_, full) = show(&ctx, &provider, &mut state, 0.0, vec![], configure);
+    assert!(provider.tooltips.borrow().is_empty(), "not hovered");
+    let header = drawn_at(&full.shapes, "Column 1").expect("header drawn");
+
+    // Rest on the second column's header past the tooltip delay.
+    let mut full = full;
+    for (frame, time) in [1.0, 1.1, 1.8, 1.9].into_iter().enumerate() {
+        let events = if frame == 0 {
+            vec![Event::PointerMoved(header.center())]
+        } else {
+            vec![]
+        };
+        full = show(&ctx, &provider, &mut state, time, events, configure).1;
+    }
+    let shown = texts(&full.shapes);
+    assert!(
+        shown.iter().any(|(text, _)| text == "About column 1"),
+        "{shown:?}"
+    );
+    let asked = provider.tooltips.borrow().clone();
+    assert!(
+        !asked.is_empty() && asked.iter().all(|&column| column == 1),
+        "{asked:?}"
+    );
+
+    // A column without a description shows none.
+    let header = drawn_at(&full.shapes, "Column 2").expect("header drawn");
+    for (frame, time) in [3.0, 3.1, 3.8, 3.9].into_iter().enumerate() {
+        let events = if frame == 0 {
+            vec![Event::PointerMoved(header.center())]
+        } else {
+            vec![]
+        };
+        full = show(&ctx, &provider, &mut state, time, events, configure).1;
+    }
+    assert!(provider.tooltips.borrow().contains(&2));
+    assert!(
+        !texts(&full.shapes)
+            .iter()
+            .any(|(text, _)| text.starts_with("About column")),
+        "no tooltip"
+    );
 }

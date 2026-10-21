@@ -82,6 +82,9 @@ pub trait TableProvider {
     fn can_sort(&self, _col: usize) -> bool { true }
     fn can_filter(&self, _col: usize) -> bool { true }
 
+    /// A description shown while the pointer rests on a column's header (asked only then).
+    fn header_tooltip(&self, _col: usize) -> Option<std::borrow::Cow<'_, str>> { None }
+
     // --- Hierarchical Tree Table Methods ---
 
     /// Returns the tree structural context for a row. Defaults to None (flat table).
@@ -334,6 +337,7 @@ A provider whose rows aren't all in memory (a Parquet file of billions of rows r
 - **Say what is drawn.** `TableProvider::prepare(&Viewport)` is called once per show pass, before any cell is asked for, with the visible indices (`visible`), the provider rows at them (`rows`: `VisibleRows::Identity(range)` or `VisibleRows::Mapped(&[usize])`; `span()` gives the lowest and highest), and the provider columns drawn (`columns`: sticky ones, then the visible range, through the column map). Start loading there.
 - **Draw what isn't there yet.** `TableProvider::cell_status(row, col)` returns `CellStatus::Ready`, `Loading`, or `Failed(message)`. Only ready cells are asked for with `cell_at` (and given to a custom cell renderer). A loading cell is drawn as a faint bar, a failed one as a short error with the message on hover; both are labelled for screen readers, and their rows are selected and clicked like any other. The table doesn't repaint on its own while cells load: call `Context::request_repaint` when data arrives.
 - **Never walk every row.** `TableProvider::is_lazy() -> true` limits the first frame's full sizing pass (columns fitted to their contents) to the visible rows, at most `LAZY_SIZING_ROWS` (256; `TableKit::with_max_sizing_rows` or `layout::Table::max_sizing_rows` set it explicitly). Columns that can't be sorted or filtered without reading every row return `false` from `can_sort`/`can_filter`: the header hides those controls and the table never sorts or filters by them. A lazy provider's rows aren't searched for a row's key either (keyboard focus falls back to the first row instead).
+- **Pin and describe columns.** `TableKit::with_sticky_columns(n)` keeps the first `n` columns (after the column map) in place while the others scroll sideways, for a row-number gutter; `prepare` lists them first. `TableProvider::header_tooltip` describes a column (its type, sizes, statistics) while the pointer rests on its header, and is asked only then.
 - **Rows past 2^32.** Selection, expansion, highlights, and a tree's filter matches are `RoaringBitmap`s of `u32`, so they hold rows `0..2^32` (`state::BITMAP_ROWS`). A row past them is never selected, highlighted, or expanded (selecting it does nothing; Select All selects the first 2^32) and is never taken for another row: every bitmap access goes through `state::row_bit(row) -> Option<u32>`. `TableState::is_selected(row)` and `is_expanded(row)` answer for any row.
 
 `examples/lazy.rs` shows a billion rows of sixty columns served in 1,024-row blocks by a loader thread (`cargo run --release --example lazy`).

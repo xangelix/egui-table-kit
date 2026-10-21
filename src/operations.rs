@@ -344,6 +344,13 @@ pub trait TableProvider {
     fn column_count(&self) -> usize;
     fn header(&self, index: usize) -> Option<Cow<'_, str>>;
 
+    /// A description of the column shown while the pointer rests on its header (its type,
+    /// sizes, statistics), or `None` for no tooltip. Asked only while the header is hovered, so
+    /// it may take time to build: cache it if it does. `None` by default.
+    fn header_tooltip(&self, _index: usize) -> Option<Cow<'_, str>> {
+        None
+    }
+
     fn headers(&self) -> HeaderIter<'_>;
 
     fn row_count(&self) -> usize;

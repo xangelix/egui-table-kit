@@ -253,6 +253,17 @@ impl TableDelegate for TableKitDelegate<'_> {
                     *self.halt_error = Some(e);
                 }
             }
+
+            // The provider's description of the column, asked only while the header is hovered.
+            if !ui.is_sizing_pass() {
+                let rect = ui.max_rect().expand2(0.5 * ui.spacing().item_spacing);
+                let hover = ui.interact(rect, ui.id().with("header_tooltip"), Sense::hover());
+                if hover.hovered()
+                    && let Some(tooltip) = self.provider.header_tooltip(col_idx)
+                {
+                    hover.on_hover_text(tooltip.as_ref());
+                }
+            }
         });
     }
 

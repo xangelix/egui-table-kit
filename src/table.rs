@@ -33,6 +33,7 @@ pub struct TableKit<'a> {
     drag_enabled: bool,
     column_map: Option<Vec<usize>>,
     max_sizing_rows: Option<u64>,
+    sticky_columns: usize,
 }
 
 impl<'a> TableKit<'a> {
@@ -65,6 +66,7 @@ impl<'a> TableKit<'a> {
             drag_enabled: false,
             column_map: None,
             max_sizing_rows: None,
+            sticky_columns: 0,
         }
     }
 
@@ -204,6 +206,16 @@ impl<'a> TableKit<'a> {
         self
     }
 
+    /// Keep the first `columns` layout columns (after the column map) in place while the others
+    /// scroll sideways: a row-number gutter, or a name column. Their cells and headers are drawn
+    /// as any other's, and [`TableProvider::prepare`] is told about them first. None by default,
+    /// as before; more than there are columns makes every column sticky.
+    #[must_use]
+    pub const fn with_sticky_columns(mut self, columns: usize) -> Self {
+        self.sticky_columns = columns;
+        self
+    }
+
     /// Select/reorder provider columns. Custom cell callbacks receive provider column indices.
     #[must_use]
     pub fn with_column_map(mut self, columns: Vec<usize>) -> Self {
@@ -312,6 +324,7 @@ impl<'a> TableKit<'a> {
             .num_rows(self.state.active_rows.len() as u64)
             .max_sizing_rows(max_sizing_rows)
             .columns(columns)
+            .num_sticky_cols(self.sticky_columns)
             .auto_size_mode(self.auto_size_mode) // <--- Forward auto-size mode
             .headers(if self.header {
                 vec![crate::layout::HeaderRow::new(self.row_height)]
