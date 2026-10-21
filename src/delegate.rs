@@ -220,10 +220,35 @@ impl TableDelegate for TableKitDelegate<'_> {
         });
         ui.visuals_mut().widgets.noninteractive.weak_bg_fill = bg_color;
 
+        // A subtitle takes the lower part of a header tall enough for two lines: the title and
+        // its controls keep the upper part.
+        let full = ui.max_rect();
+        let line = ui.text_style_height(&egui::TextStyle::Body);
+        let subtitle = self
+            .provider
+            .header_subtitle(col_idx)
+            .filter(|_| full.height() >= 2.0 * line + 4.0);
+        let split = full.top() + (full.height() * 0.56).round();
+
         // Isolate ID namespace per column to prevent sort/ellipsis widget ID collisions
         ui.push_id(col_idx, |ui| {
+            let mut title_ui = subtitle.as_ref().map(|_| {
+                let gapless = full.expand2(0.5 * ui.spacing().item_spacing);
+                ui.painter()
+                    .rect_filled(gapless, egui::CornerRadius::ZERO, bg_color);
+                ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_min_max(
+                            full.min,
+                            egui::pos2(full.max.x, split),
+                        ))
+                        .layout(*ui.layout())
+                        .id_salt("title"),
+                )
+            });
+            let title_ui = title_ui.as_mut().unwrap_or(ui);
             match show_header_cell_with_controls(
-                ui,
+                title_ui,
                 title.as_ref(),
                 &sort_up,
                 previous_response,
@@ -252,6 +277,28 @@ impl TableDelegate for TableKitDelegate<'_> {
                 Err(e) => {
                     *self.halt_error = Some(e);
                 }
+            }
+
+            if let Some(subtitle) = &subtitle {
+                let mut below = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_min_max(
+                            egui::pos2(full.min.x, split),
+                            full.max,
+                        ))
+                        .layout(egui::Layout::left_to_right(egui::Align::Min))
+                        .id_salt("subtitle"),
+                );
+                below.add_space(8.0);
+                below.add(
+                    egui::Label::new(
+                        egui::RichText::new(subtitle.as_ref())
+                            .small()
+                            .color(below.visuals().weak_text_color()),
+                    )
+                    .selectable(false)
+                    .truncate(),
+                );
             }
 
             // The provider's description of the column, asked only while the header is hovered.

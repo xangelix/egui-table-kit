@@ -34,6 +34,8 @@ pub struct TableKit<'a> {
     column_map: Option<Vec<usize>>,
     max_sizing_rows: Option<u64>,
     sticky_columns: usize,
+    header_height: Option<f32>,
+    header_color: Option<egui::Color32>,
 }
 
 impl<'a> TableKit<'a> {
@@ -67,6 +69,8 @@ impl<'a> TableKit<'a> {
             column_map: None,
             max_sizing_rows: None,
             sticky_columns: 0,
+            header_height: None,
+            header_color: None,
         }
     }
 
@@ -216,6 +220,21 @@ impl<'a> TableKit<'a> {
         self
     }
 
+    /// Set the header row's height (the row height by default). A header at least two lines
+    /// tall shows each column's [`TableProvider::header_subtitle`] under its title.
+    #[must_use]
+    pub const fn with_header_height(mut self, height: f32) -> Self {
+        self.header_height = Some(height);
+        self
+    }
+
+    /// Set the header row's background (a gray by default).
+    #[must_use]
+    pub const fn with_header_color(mut self, color: egui::Color32) -> Self {
+        self.header_color = Some(color);
+        self
+    }
+
     /// Select/reorder provider columns. Custom cell callbacks receive provider column indices.
     #[must_use]
     pub fn with_column_map(mut self, columns: Vec<usize>) -> Self {
@@ -327,7 +346,9 @@ impl<'a> TableKit<'a> {
             .num_sticky_cols(self.sticky_columns)
             .auto_size_mode(self.auto_size_mode) // <--- Forward auto-size mode
             .headers(if self.header {
-                vec![crate::layout::HeaderRow::new(self.row_height)]
+                vec![crate::layout::HeaderRow::new(
+                    self.header_height.unwrap_or(self.row_height),
+                )]
             } else {
                 Vec::new()
             });
@@ -364,6 +385,7 @@ impl<'a> TableKit<'a> {
                 &mut secondary_clicked,
             );
             delegate.row_height = self.row_height;
+            delegate.header_bg_color = self.header_color;
             delegate.cell_align = self.cell_align;
             delegate.striped = self.striped;
             delegate.striping_color = self.striping_color;

@@ -351,6 +351,13 @@ pub trait TableProvider {
         None
     }
 
+    /// A second, smaller line under the column's title (its type or unit), drawn when the header
+    /// row is tall enough for two lines ([`crate::table::TableKit::with_header_height`]), or
+    /// `None` for none. `None` by default.
+    fn header_subtitle(&self, _index: usize) -> Option<Cow<'_, str>> {
+        None
+    }
+
     fn headers(&self) -> HeaderIter<'_>;
 
     fn row_count(&self) -> usize;

@@ -113,6 +113,10 @@ impl TableProvider for Recording {
         (index != 2).then(|| Cow::Owned(format!("About column {index}")))
     }
 
+    fn header_subtitle(&self, index: usize) -> Option<Cow<'_, str>> {
+        Some(Cow::Owned(format!("type {index}")))
+    }
+
     fn row_count(&self) -> usize {
         self.rows
     }
@@ -1148,5 +1152,41 @@ fn header_tooltips_are_asked_for_only_while_hovered() {
             .iter()
             .any(|(text, _)| text.starts_with("About column")),
         "no tooltip"
+    );
+}
+
+/// A header tall enough for two lines shows each column's subtitle under its title; a header one
+/// row tall shows none.
+#[test]
+fn tall_headers_show_subtitles_under_their_titles() {
+    let ctx = egui::Context::default();
+    let provider = Recording::lazy(100, 3);
+    let mut state = TableState::new("subtitles", 100);
+    fn tall(table: TableKit<'_>) -> TableKit<'_> {
+        table
+            .with_columns((0..3).map(|_| crate::layout::Column::new(120.0)).collect())
+            .with_header_height(40.0)
+            .with_header_color(egui::Color32::from_rgb(1, 2, 3))
+    }
+    let (_, full) = show(&ctx, &provider, &mut state, 0.0, vec![], tall);
+    let title = drawn_at(&full.shapes, "Column 1").expect("title drawn");
+    let subtitle = drawn_at(&full.shapes, "type 1").expect("subtitle drawn");
+    assert!(
+        subtitle.top() >= title.bottom(),
+        "{title:?} above {subtitle:?}"
+    );
+    assert!((subtitle.left() - title.left()).abs() < 2.0, "aligned");
+
+    fn short(table: TableKit<'_>) -> TableKit<'_> {
+        table.with_columns((0..3).map(|_| crate::layout::Column::new(120.0)).collect())
+    }
+    let mut state = TableState::new("no-subtitles", 100);
+    let (_, full) = show(&ctx, &provider, &mut state, 0.0, vec![], short);
+    assert!(drawn_at(&full.shapes, "Column 1").is_some());
+    assert!(
+        !texts(&full.shapes)
+            .iter()
+            .any(|(text, _)| text.starts_with("type ")),
+        "no room for a subtitle"
     );
 }
