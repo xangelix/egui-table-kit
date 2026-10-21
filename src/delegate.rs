@@ -40,6 +40,12 @@ pub struct TableKitDelegate<'a> {
     /// lays them out as `ui.horizontal` does. Custom cells lay out their own contents.
     pub cell_align: Option<egui::Align>,
     pub header_bg_color: Option<Color32>,
+    /// How many layout columns stay in place (the table's sticky columns).
+    pub sticky_columns: usize,
+    /// The sticky columns' cells' fill, in place of the stripes; `None` fills them as any other.
+    pub sticky_fill: Option<Color32>,
+    /// A line down the right edge of the last sticky column; `None` draws none.
+    pub sticky_edge: Option<egui::Stroke>,
 
     pub striped: bool,
     pub striping_color: Option<Color32>,
@@ -88,6 +94,25 @@ impl<'a> TableKitDelegate<'a> {
         }
     }
 
+    /// Whether layout column `layout_col` is the last sticky one, where the sticky edge is drawn.
+    fn is_sticky_end(&self, layout_col: usize) -> bool {
+        let columns = self
+            .column_map
+            .as_ref()
+            .map_or_else(|| self.provider.column_count(), Vec::len);
+        self.sticky_columns > 0 && layout_col + 1 == self.sticky_columns.min(columns)
+    }
+
+    /// Draws the sticky edge down the right of `rect` (the cell's own, inside its clip).
+    fn paint_sticky_edge(&self, ui: &Ui, rect: egui::Rect, layout_col: usize) {
+        if let Some(stroke) = self.sticky_edge
+            && self.is_sticky_end(layout_col)
+        {
+            let x = rect.right() - 0.5 * stroke.width;
+            ui.painter().vline(x, rect.y_range(), stroke);
+        }
+    }
+
     /// Creates a new delegate instance with robust visual defaults.
     #[expect(
         clippy::too_many_arguments,
@@ -122,6 +147,9 @@ impl<'a> TableKitDelegate<'a> {
             row_height: 16.0,
             cell_align: None,
             header_bg_color: None,
+            sticky_columns: 0,
+            sticky_fill: None,
+            sticky_edge: None,
             striped: false,
             striping_color: None,
             hover_color: None,
@@ -312,6 +340,7 @@ impl TableDelegate for TableKitDelegate<'_> {
                 }
             }
         });
+        self.paint_sticky_edge(ui, ui.max_rect(), cell.col_range.end.saturating_sub(1));
     }
 
     fn cell_ui(&mut self, ui: &mut Ui, cell: &CellInfo) {
@@ -373,6 +402,11 @@ impl TableDelegate for TableKitDelegate<'_> {
             // 1. Base layer
             let base_color = if let Some(rgb) = highlight_rgb {
                 Some(Color32::from_rgb(rgb[0], rgb[1], rgb[2]))
+            } else if let Some(fill) = self
+                .sticky_fill
+                .filter(|_| layout_col_nr < self.sticky_columns)
+            {
+                Some(fill)
             } else if self.striped && cell.row_nr % 2 == 1 {
                 Some(
                     self.striping_color
@@ -395,6 +429,9 @@ impl TableDelegate for TableKitDelegate<'_> {
                 ui.painter().rect_filled(cell_rect, corners, hover_fill);
             }
         }
+
+        // The cell's own rect: the painting rect above reaches past it, into its clip.
+        self.paint_sticky_edge(ui, ui.max_rect(), layout_col_nr);
 
         // Render visual guidelines inside the tree cells
         let is_tree_changed = if cell.col_nr == 0 && self.provider.is_tree() {

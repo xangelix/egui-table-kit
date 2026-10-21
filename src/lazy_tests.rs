@@ -1190,3 +1190,127 @@ fn tall_headers_show_subtitles_under_their_titles() {
         "no room for a subtitle"
     );
 }
+
+/// What of each filled rectangle of `color` shows: the rectangle within its clip.
+fn filled(shapes: &[egui::epaint::ClippedShape], color: egui::Color32) -> Vec<egui::Rect> {
+    fn collect(
+        shape: &egui::Shape,
+        clip: egui::Rect,
+        color: egui::Color32,
+        out: &mut Vec<egui::Rect>,
+    ) {
+        match shape {
+            egui::Shape::Rect(rect) if rect.fill == color => {
+                let shown = rect.rect.intersect(clip);
+                if shown.is_positive() {
+                    out.push(shown);
+                }
+            }
+            egui::Shape::Vec(shapes) => shapes
+                .iter()
+                .for_each(|shape| collect(shape, clip, color, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in shapes {
+        collect(&clipped.shape, clipped.clip_rect, color, &mut out);
+    }
+    out
+}
+
+/// The x of each vertical line of `color`, with its clip.
+fn vertical_lines(
+    shapes: &[egui::epaint::ClippedShape],
+    color: egui::Color32,
+) -> Vec<(f32, egui::Rect)> {
+    fn collect(
+        shape: &egui::Shape,
+        clip: egui::Rect,
+        color: egui::Color32,
+        out: &mut Vec<(f32, egui::Rect)>,
+    ) {
+        match shape {
+            egui::Shape::LineSegment { points, stroke }
+                if stroke.color == color && (points[0].x - points[1].x).abs() < 0.01 =>
+            {
+                out.push((points[0].x, clip));
+            }
+            egui::Shape::Vec(shapes) => shapes
+                .iter()
+                .for_each(|shape| collect(shape, clip, color, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in shapes {
+        collect(&clipped.shape, clipped.clip_rect, color, &mut out);
+    }
+    out
+}
+
+/// A sticky fill covers each sticky cell edge to edge (not just inside its padding), in place of
+/// the stripes there, and the sticky edge runs down the last sticky column's right side, inside
+/// what is shown of it, header included.
+#[test]
+fn sticky_columns_are_filled_edge_to_edge_with_an_edge_line() {
+    const FILL: egui::Color32 = egui::Color32::from_rgb(10, 20, 30);
+    const STRIPE: egui::Color32 = egui::Color32::from_rgb(40, 50, 60);
+    const EDGE: egui::Color32 = egui::Color32::from_rgb(70, 80, 90);
+    let ctx = egui::Context::default();
+    let provider = Recording::lazy(100, 4);
+    let mut state = TableState::new("sticky-fill", 100);
+    fn configure(table: TableKit<'_>) -> TableKit<'_> {
+        table
+            .with_columns((0..4).map(|_| crate::layout::Column::new(120.0)).collect())
+            .with_sticky_columns(1)
+            .with_striped(true)
+            .with_striping_color(STRIPE)
+            .with_sticky_fill(FILL)
+            .with_sticky_edge(egui::Stroke::new(1.0, EDGE))
+    }
+    let (_, full) = show(&ctx, &provider, &mut state, 0.0, vec![], configure);
+    let first = drawn_at(&full.shapes, "r1c0").expect("sticky cell drawn");
+    let second = drawn_at(&full.shapes, "r1c1").expect("next cell drawn");
+
+    let fills = filled(&full.shapes, FILL);
+    assert!(fills.len() > 5, "{fills:?}");
+    let (left, right) = (fills[0].left(), fills[0].right());
+    for fill in &fills {
+        assert!(
+            (fill.left() - left).abs() < 0.01 && (fill.right() - right).abs() < 0.01,
+            "{fill:?}"
+        );
+    }
+    assert!(
+        (right - left - 120.0).abs() < 0.5,
+        "a whole column: {left}..{right}"
+    );
+    assert!(left < first.left() - 6.0, "fills the padding too");
+    assert!(right <= second.left(), "stops at the column's edge");
+    // Each row's fill meets the next one's.
+    let mut tops: Vec<f32> = fills.iter().map(|fill| fill.top()).collect();
+    tops.sort_by(f32::total_cmp);
+    let height = fills[0].height();
+    for pair in tops.windows(2) {
+        assert!((pair[1] - pair[0] - height).abs() < 0.5, "{pair:?}");
+    }
+    // Stripes stay out of the sticky column.
+    for stripe in filled(&full.shapes, STRIPE) {
+        assert!(stripe.left() >= right - 0.01, "{stripe:?}");
+    }
+
+    let edges = vertical_lines(&full.shapes, EDGE);
+    assert!(edges.len() > 5, "{edges:?}");
+    for (x, clip) in &edges {
+        assert!((x - (right - 0.5)).abs() < 0.01, "{x} against {right}");
+        assert!(clip.x_range().contains(*x), "shown: {x} in {clip:?}");
+    }
+    let header = drawn_at(&full.shapes, "Column 0").expect("header drawn");
+    assert!(
+        edges
+            .iter()
+            .any(|(_, clip)| clip.y_range().contains(header.center().y)),
+        "through the header"
+    );
+}

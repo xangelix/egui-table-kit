@@ -34,6 +34,8 @@ pub struct TableKit<'a> {
     column_map: Option<Vec<usize>>,
     max_sizing_rows: Option<u64>,
     sticky_columns: usize,
+    sticky_fill: Option<egui::Color32>,
+    sticky_edge: Option<egui::Stroke>,
     header_height: Option<f32>,
     header_color: Option<egui::Color32>,
 }
@@ -69,6 +71,8 @@ impl<'a> TableKit<'a> {
             column_map: None,
             max_sizing_rows: None,
             sticky_columns: 0,
+            sticky_fill: None,
+            sticky_edge: None,
             header_height: None,
             header_color: None,
         }
@@ -217,6 +221,23 @@ impl<'a> TableKit<'a> {
     #[must_use]
     pub const fn with_sticky_columns(mut self, columns: usize) -> Self {
         self.sticky_columns = columns;
+        self
+    }
+
+    /// Fill the sticky columns' cells with `color` instead of the stripes, across each whole
+    /// cell, so a gutter reads as one band. Highlights, hovering, and selection still show over
+    /// it. Unset, sticky cells are filled as any other, as before.
+    #[must_use]
+    pub const fn with_sticky_fill(mut self, color: egui::Color32) -> Self {
+        self.sticky_fill = Some(color);
+        self
+    }
+
+    /// Draw `stroke` down the right edge of the last sticky column, header included, where the
+    /// columns that scroll pass under it. None by default.
+    #[must_use]
+    pub const fn with_sticky_edge(mut self, stroke: egui::Stroke) -> Self {
+        self.sticky_edge = Some(stroke);
         self
     }
 
@@ -386,6 +407,9 @@ impl<'a> TableKit<'a> {
             );
             delegate.row_height = self.row_height;
             delegate.header_bg_color = self.header_color;
+            delegate.sticky_columns = self.sticky_columns;
+            delegate.sticky_fill = self.sticky_fill;
+            delegate.sticky_edge = self.sticky_edge;
             delegate.cell_align = self.cell_align;
             delegate.striped = self.striped;
             delegate.striping_color = self.striping_color;
