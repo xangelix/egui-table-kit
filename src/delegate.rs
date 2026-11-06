@@ -1,11 +1,14 @@
 use egui::{Color32, Margin, Response, Sense, Ui};
+use fluent_zero::t;
 
 use super::{
     error::TableError,
     filter::highlight::select_color,
-    header::{ColResponse, HeaderMenuAnchor, show_header_cell_contents, text_row},
+    header::{
+        ColResponse, HeaderControls, HeaderMenuAnchor, show_header_cell_with_controls, text_row,
+    },
     layout::{CellInfo, HeaderCellInfo, PrefetchInfo, TableDelegate},
-    operations::{BorrowedRow, Row, TableProvider},
+    operations::{BorrowedRow, CellStatus, Row, TableProvider, Viewport},
     state::TableState,
 };
 use crate::interaction::{RowEvent, RowEventKind, RowGeometry, SelectionInput};
@@ -37,6 +40,12 @@ pub struct TableKitDelegate<'a> {
     /// lays them out as `ui.horizontal` does. Custom cells lay out their own contents.
     pub cell_align: Option<egui::Align>,
     pub header_bg_color: Option<Color32>,
+    /// How many layout columns stay in place (the table's sticky columns).
+    pub sticky_columns: usize,
+    /// The sticky columns' cells' fill, in place of the stripes; `None` fills them as any other.
+    pub sticky_fill: Option<Color32>,
+    /// A line down the right edge of the last sticky column; `None` draws none.
+    pub sticky_edge: Option<egui::Stroke>,
 
     pub striped: bool,
     pub striping_color: Option<Color32>,
@@ -85,6 +94,25 @@ impl<'a> TableKitDelegate<'a> {
         }
     }
 
+    /// Whether layout column `layout_col` is the last sticky one, where the sticky edge is drawn.
+    fn is_sticky_end(&self, layout_col: usize) -> bool {
+        let columns = self
+            .column_map
+            .as_ref()
+            .map_or_else(|| self.provider.column_count(), Vec::len);
+        self.sticky_columns > 0 && layout_col + 1 == self.sticky_columns.min(columns)
+    }
+
+    /// Draws the sticky edge down the right of `rect` (the cell's own, inside its clip).
+    fn paint_sticky_edge(&self, ui: &Ui, rect: egui::Rect, layout_col: usize) {
+        if let Some(stroke) = self.sticky_edge
+            && self.is_sticky_end(layout_col)
+        {
+            let x = rect.right() - 0.5 * stroke.width;
+            ui.painter().vline(x, rect.y_range(), stroke);
+        }
+    }
+
     /// Creates a new delegate instance with robust visual defaults.
     #[expect(
         clippy::too_many_arguments,
@@ -119,6 +147,9 @@ impl<'a> TableKitDelegate<'a> {
             row_height: 16.0,
             cell_align: None,
             header_bg_color: None,
+            sticky_columns: 0,
+            sticky_fill: None,
+            sticky_edge: None,
             striped: false,
             striping_color: None,
             hover_color: None,
@@ -153,13 +184,33 @@ impl TableDelegate for TableKitDelegate<'_> {
         self.row_height
     }
 
-    fn prepare(&mut self, _info: &PrefetchInfo) {
+    fn prepare(&mut self, info: &PrefetchInfo) {
         if self.is_new_pass {
             self.is_new_pass = false;
             self.collected_responses.clear();
             self.hovered_row = None;
             self.events.clear();
             self.rows.clear();
+
+            // Tell the provider what this pass draws, before any cell is asked for.
+            let column_count = self.provider.column_count();
+            let columns: Vec<usize> = (0..info.num_sticky_columns)
+                .chain(info.visible_columns.clone())
+                .filter_map(|layout_col| match &self.column_map {
+                    Some(map) => map.get(layout_col).copied(),
+                    None => Some(layout_col),
+                })
+                .filter(|&column| column < column_count)
+                .collect();
+            let shown = self.state.active_rows.len();
+            let to_index = |row: u64| usize::try_from(row).map_or(shown, |row| row.min(shown));
+            let start = to_index(info.visible_rows.start);
+            let end = to_index(info.visible_rows.end).max(start);
+            self.provider.prepare(&Viewport {
+                visible: start as u64..end as u64,
+                rows: self.state.active_rows.slice(start..end),
+                columns: &columns,
+            });
         }
     }
 
@@ -173,6 +224,10 @@ impl TableDelegate for TableKitDelegate<'_> {
             return;
         };
         let title = self.provider.header(col_idx).unwrap_or_default();
+        let controls = HeaderControls::new(
+            self.provider.can_sort(col_idx),
+            self.provider.can_filter(col_idx),
+        );
 
         let default_response = ColResponse::default();
         let (previous_response, sort_up) = self
@@ -193,10 +248,35 @@ impl TableDelegate for TableKitDelegate<'_> {
         });
         ui.visuals_mut().widgets.noninteractive.weak_bg_fill = bg_color;
 
+        // A subtitle takes the lower part of a header tall enough for two lines: the title and
+        // its controls keep the upper part.
+        let full = ui.max_rect();
+        let line = ui.text_style_height(&egui::TextStyle::Body);
+        let subtitle = self
+            .provider
+            .header_subtitle(col_idx)
+            .filter(|_| full.height() >= 2.0 * line + 4.0);
+        let split = full.top() + (full.height() * 0.56).round();
+
         // Isolate ID namespace per column to prevent sort/ellipsis widget ID collisions
         ui.push_id(col_idx, |ui| {
-            match show_header_cell_contents(
-                ui,
+            let mut title_ui = subtitle.as_ref().map(|_| {
+                let gapless = full.expand2(0.5 * ui.spacing().item_spacing);
+                ui.painter()
+                    .rect_filled(gapless, egui::CornerRadius::ZERO, bg_color);
+                ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_min_max(
+                            full.min,
+                            egui::pos2(full.max.x, split),
+                        ))
+                        .layout(*ui.layout())
+                        .id_salt("title"),
+                )
+            });
+            let title_ui = title_ui.as_mut().unwrap_or(ui);
+            match show_header_cell_with_controls(
+                title_ui,
                 title.as_ref(),
                 &sort_up,
                 previous_response,
@@ -204,11 +284,21 @@ impl TableDelegate for TableKitDelegate<'_> {
                 self.user_colors,
                 self.header_menu_anchor,
                 self.cell_align,
+                controls,
             ) {
                 Ok(response) => {
-                    if col_idx >= self.collected_responses.len() {
-                        self.collected_responses
-                            .resize_with(col_idx + 1, ColResponse::default);
+                    // A column not drawn this pass (scrolled out of view, or left out of the
+                    // column map) keeps its filter: it has no header to change it.
+                    while self.collected_responses.len() <= col_idx {
+                        let column = self.collected_responses.len();
+                        let kept = self.state.columns.get(column).map_or_else(
+                            ColResponse::default,
+                            |state| ColResponse {
+                                filtering: state.response.filtering.clone(),
+                                ..ColResponse::default()
+                            },
+                        );
+                        self.collected_responses.push(kept);
                     }
                     self.collected_responses[col_idx] = response;
                 }
@@ -216,7 +306,41 @@ impl TableDelegate for TableKitDelegate<'_> {
                     *self.halt_error = Some(e);
                 }
             }
+
+            if let Some(subtitle) = &subtitle {
+                let mut below = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_min_max(
+                            egui::pos2(full.min.x, split),
+                            full.max,
+                        ))
+                        .layout(egui::Layout::left_to_right(egui::Align::Min))
+                        .id_salt("subtitle"),
+                );
+                below.add_space(8.0);
+                below.add(
+                    egui::Label::new(
+                        egui::RichText::new(subtitle.as_ref())
+                            .small()
+                            .color(below.visuals().weak_text_color()),
+                    )
+                    .selectable(false)
+                    .truncate(),
+                );
+            }
+
+            // The provider's description of the column, asked only while the header is hovered.
+            if !ui.is_sizing_pass() {
+                let rect = ui.max_rect().expand2(0.5 * ui.spacing().item_spacing);
+                let hover = ui.interact(rect, ui.id().with("header_tooltip"), Sense::hover());
+                if hover.hovered()
+                    && let Some(tooltip) = self.provider.header_tooltip(col_idx)
+                {
+                    hover.on_hover_text(tooltip.as_ref());
+                }
+            }
         });
+        self.paint_sticky_edge(ui, ui.max_rect(), cell.col_range.end.saturating_sub(1));
     }
 
     fn cell_ui(&mut self, ui: &mut Ui, cell: &CellInfo) {
@@ -240,12 +364,14 @@ impl TableDelegate for TableKitDelegate<'_> {
             }
             None => cell,
         };
-        let current_visible_idx = cell.row_nr as usize;
-        let Some(&row_idx) = self.state.active_rows.get(current_visible_idx) else {
+        let Ok(current_visible_idx) = usize::try_from(cell.row_nr) else {
+            return;
+        };
+        let Some(row_idx) = self.state.active_rows.get(current_visible_idx) else {
             return;
         };
 
-        let is_selected = self.state.selected_rows.contains(row_idx as u32);
+        let is_selected = self.state.is_selected(row_idx);
         let highlight = self.state.highlights.get_usize(row_idx);
 
         let item_spacing = ui.spacing().item_spacing;
@@ -276,6 +402,11 @@ impl TableDelegate for TableKitDelegate<'_> {
             // 1. Base layer
             let base_color = if let Some(rgb) = highlight_rgb {
                 Some(Color32::from_rgb(rgb[0], rgb[1], rgb[2]))
+            } else if let Some(fill) = self
+                .sticky_fill
+                .filter(|_| layout_col_nr < self.sticky_columns)
+            {
+                Some(fill)
             } else if self.striped && cell.row_nr % 2 == 1 {
                 Some(
                     self.striping_color
@@ -299,6 +430,9 @@ impl TableDelegate for TableKitDelegate<'_> {
             }
         }
 
+        // The cell's own rect: the painting rect above reaches past it, into its clip.
+        self.paint_sticky_edge(ui, ui.max_rect(), layout_col_nr);
+
         // Render visual guidelines inside the tree cells
         let is_tree_changed = if cell.col_nr == 0 && self.provider.is_tree() {
             if let Some(hierarchy) = self.provider.row_hierarchy(self.state, row_idx) {
@@ -314,9 +448,7 @@ impl TableDelegate for TableKitDelegate<'_> {
             ui.ctx().request_repaint();
             if self.track_events {
                 let key = self.provider.row_key(row_idx);
-                let kind = RowEventKind::ExpansionChanged(
-                    self.state.expanded_rows.contains(row_idx as u32),
-                );
+                let kind = RowEventKind::ExpansionChanged(self.state.is_expanded(row_idx));
                 if self
                     .state
                     .accept_event(ui.ctx().cumulative_frame_nr(), key, kind)
@@ -398,7 +530,7 @@ impl TableDelegate for TableKitDelegate<'_> {
                         row.hit_regions.push(strip);
                     }
                 } else {
-                    let mut hit_regions = Vec::with_capacity(self.provider.column_count() + 1);
+                    let mut hit_regions = Vec::with_capacity(2);
                     if interact_clipped.is_positive() {
                         hit_regions.push(interact_clipped);
                     }
@@ -566,22 +698,42 @@ impl TableDelegate for TableKitDelegate<'_> {
             provider: self.provider,
             row_index: row_idx,
         };
-        let value = match borrowed_row.try_cell(cell.col_nr) {
-            Ok(value) => value,
-            Err(error) => {
-                *self.halt_error = Some(error);
-                return;
+        // Only a ready cell's value is asked for; a loading or failed one is drawn without it.
+        let status = self.provider.cell_status(row_idx, cell.col_nr);
+        let value = if matches!(status, CellStatus::Ready) {
+            match borrowed_row.try_cell(cell.col_nr) {
+                Ok(value) => value,
+                Err(error) => {
+                    *self.halt_error = Some(error);
+                    return;
+                }
             }
+        } else {
+            None
         };
-        if let Some((label, _)) = &value {
-            response.widget_info(|| {
-                egui::WidgetInfo::selected(
-                    egui::WidgetType::SelectableLabel,
-                    ui.is_enabled(),
-                    is_selected,
-                    label.as_ref(),
-                )
-            });
+        let widget_label = |label: &str| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::SelectableLabel,
+                ui.is_enabled(),
+                is_selected,
+                label,
+            )
+        };
+        match &status {
+            CellStatus::Loading => response.widget_info(|| widget_label(&t!("cell-loading"))),
+            CellStatus::Failed(message) => {
+                response.widget_info(|| widget_label(&format!("{}: {message}", t!("cell-failed"))))
+            }
+            _ => {
+                if let Some((label, _)) = &value {
+                    response.widget_info(|| widget_label(label.as_ref()));
+                }
+            }
+        }
+        if let CellStatus::Failed(message) = &status
+            && !ui.is_sizing_pass()
+        {
+            response.on_hover_text(message.as_ref());
         }
         if self.focus_outline && self.state.focused_key == Some(key) {
             let clipped = cell_rect.intersect(ui.clip_rect());
@@ -607,6 +759,27 @@ impl TableDelegate for TableKitDelegate<'_> {
         // Wrap everything inside an inner-margin Frame to provide clean cell margins
         egui::Frame::NONE.inner_margin(padding).show(ui, |ui| {
             ui.push_id((cell.row_nr, cell.col_nr), |ui| {
+                match &status {
+                    CellStatus::Ready => {}
+                    CellStatus::Failed(_) => {
+                        text_row(ui, self.cell_align, |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(t!("cell-failed"))
+                                        .color(ui.visuals().error_fg_color),
+                                )
+                                .selectable(false)
+                                .wrap_mode(egui::TextWrapMode::Truncate),
+                            );
+                        });
+                        return;
+                    }
+                    _ => {
+                        loading_placeholder(ui, text_color);
+                        return;
+                    }
+                }
+
                 let custom_renderer = self.custom_cell_ui.as_mut();
 
                 if let Some(renderer) = custom_renderer
@@ -630,5 +803,26 @@ impl TableDelegate for TableKitDelegate<'_> {
                 }
             });
         });
+    }
+}
+
+/// A loading cell's placeholder: a faint rounded bar across about 60% of the cell, centred on
+/// its height. It takes no room, so it doesn't widen columns fitted to their contents.
+fn loading_placeholder(ui: &Ui, text_color: Color32) {
+    if ui.is_sizing_pass() {
+        return;
+    }
+    let rect = ui.max_rect();
+    let height = (ui.text_style_height(&egui::TextStyle::Body) * 0.55)
+        .min(rect.height())
+        .max(2.0);
+    let bar = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.center().y - height / 2.0),
+        egui::vec2(rect.width() * 0.6, height),
+    );
+    if bar.is_positive() {
+        let radius = (height / 2.0).round().clamp(0.0, f32::from(u8::MAX)) as u8;
+        ui.painter()
+            .rect_filled(bar, radius, text_color.gamma_multiply(0.18));
     }
 }

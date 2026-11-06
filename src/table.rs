@@ -6,6 +6,9 @@ use crate::{
     state::TableState,
 };
 
+/// How many rows a full sizing pass lays out for a lazy provider ([`TableProvider::is_lazy`]).
+pub const LAZY_SIZING_ROWS: u64 = 256;
+
 pub struct TableKit<'a> {
     id: String,
     provider: &'a dyn TableProvider,
@@ -29,6 +32,12 @@ pub struct TableKit<'a> {
     auto_size_mode: crate::layout::AutoSizeMode,
     drag_enabled: bool,
     column_map: Option<Vec<usize>>,
+    max_sizing_rows: Option<u64>,
+    sticky_columns: usize,
+    sticky_fill: Option<egui::Color32>,
+    sticky_edge: Option<egui::Stroke>,
+    header_height: Option<f32>,
+    header_color: Option<egui::Color32>,
 }
 
 impl<'a> TableKit<'a> {
@@ -60,6 +69,12 @@ impl<'a> TableKit<'a> {
             auto_size_mode: crate::layout::AutoSizeMode::OnParentResize,
             drag_enabled: false,
             column_map: None,
+            max_sizing_rows: None,
+            sticky_columns: 0,
+            sticky_fill: None,
+            sticky_edge: None,
+            header_height: None,
+            header_color: None,
         }
     }
 
@@ -189,6 +204,58 @@ impl<'a> TableKit<'a> {
         self
     }
 
+    /// Limits the rows a full sizing pass (the first frame of a table with auto-fitted columns)
+    /// lays out to at most `rows` of the visible ones (see
+    /// [`crate::layout::Table::max_sizing_rows`]). Unset, a lazy provider's table lays out at
+    /// most [`LAZY_SIZING_ROWS`], any other every row, as before.
+    #[must_use]
+    pub const fn with_max_sizing_rows(mut self, rows: u64) -> Self {
+        self.max_sizing_rows = Some(rows);
+        self
+    }
+
+    /// Keep the first `columns` layout columns (after the column map) in place while the others
+    /// scroll sideways: a row-number gutter, or a name column. Their cells and headers are drawn
+    /// as any other's, and [`TableProvider::prepare`] is told about them first. None by default,
+    /// as before; more than there are columns makes every column sticky.
+    #[must_use]
+    pub const fn with_sticky_columns(mut self, columns: usize) -> Self {
+        self.sticky_columns = columns;
+        self
+    }
+
+    /// Fill the sticky columns' cells with `color` instead of the stripes, across each whole
+    /// cell, so a gutter reads as one band. Highlights, hovering, and selection still show over
+    /// it. Unset, sticky cells are filled as any other, as before.
+    #[must_use]
+    pub const fn with_sticky_fill(mut self, color: egui::Color32) -> Self {
+        self.sticky_fill = Some(color);
+        self
+    }
+
+    /// Draw `stroke` down the right edge of the last sticky column, header included, where the
+    /// columns that scroll pass under it. None by default.
+    #[must_use]
+    pub const fn with_sticky_edge(mut self, stroke: egui::Stroke) -> Self {
+        self.sticky_edge = Some(stroke);
+        self
+    }
+
+    /// Set the header row's height (the row height by default). A header at least two lines
+    /// tall shows each column's [`TableProvider::header_subtitle`] under its title.
+    #[must_use]
+    pub const fn with_header_height(mut self, height: f32) -> Self {
+        self.header_height = Some(height);
+        self
+    }
+
+    /// Set the header row's background (a gray by default).
+    #[must_use]
+    pub const fn with_header_color(mut self, color: egui::Color32) -> Self {
+        self.header_color = Some(color);
+        self
+    }
+
     /// Select/reorder provider columns. Custom cell callbacks receive provider column indices.
     #[must_use]
     pub fn with_column_map(mut self, columns: Vec<usize>) -> Self {
@@ -289,13 +356,20 @@ impl<'a> TableKit<'a> {
                 .collect::<Vec<_>>()
         });
 
+        let max_sizing_rows = self
+            .max_sizing_rows
+            .or_else(|| self.provider.is_lazy().then_some(LAZY_SIZING_ROWS));
         let mut table = crate::layout::Table::new()
             .id_salt(&self.id)
             .num_rows(self.state.active_rows.len() as u64)
+            .max_sizing_rows(max_sizing_rows)
             .columns(columns)
+            .num_sticky_cols(self.sticky_columns)
             .auto_size_mode(self.auto_size_mode) // <--- Forward auto-size mode
             .headers(if self.header {
-                vec![crate::layout::HeaderRow::new(self.row_height)]
+                vec![crate::layout::HeaderRow::new(
+                    self.header_height.unwrap_or(self.row_height),
+                )]
             } else {
                 Vec::new()
             });
@@ -332,6 +406,10 @@ impl<'a> TableKit<'a> {
                 &mut secondary_clicked,
             );
             delegate.row_height = self.row_height;
+            delegate.header_bg_color = self.header_color;
+            delegate.sticky_columns = self.sticky_columns;
+            delegate.sticky_fill = self.sticky_fill;
+            delegate.sticky_edge = self.sticky_edge;
             delegate.cell_align = self.cell_align;
             delegate.striped = self.striped;
             delegate.striping_color = self.striping_color;

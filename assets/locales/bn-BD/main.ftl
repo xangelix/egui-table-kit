@@ -40,3 +40,7 @@ deselect-filtered = ফিল্টার করাগুলো থেকে ন
 
 select-all = সব নির্বাচন করুন
 deselect-all = সব নির্বাচন বাতিল করুন
+
+# Lazy cells
+cell-loading = লোড হচ্ছে
+cell-failed = ব্যর্থ

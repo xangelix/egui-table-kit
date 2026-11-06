@@ -1,10 +1,16 @@
 //! Custom interactive view states mapped seamlessly to virtualization targets.
 
-use std::{collections::HashMap, fmt::Write as _, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt::Write as _,
+    iter::FusedIterator,
+    ops::{Range, RangeInclusive},
+    sync::Arc,
+};
 
 use compact_str::CompactString;
 use fluent_zero::t;
-use roaring::RoaringBitmap;
+use roaring::{RoaringBitmap, RoaringTreemap};
 
 use crate::operations::Row as _;
 
@@ -13,8 +19,312 @@ use super::{
     filter::Filter,
     header::{ColResponse, ColumnState},
     highlights::Highlights,
-    operations::{RowHierarchy, TableProvider},
+    operations::{RowHierarchy, TableProvider, VisibleRows},
 };
+
+/// How many rows the table's bitmaps can hold: rows `0..2^32`.
+///
+/// Selection ([`TableState::selected_rows`]), expansion ([`TableState::expanded_rows`]),
+/// highlights ([`Highlights`]), and a tree's filter matches ([`TableState::filter_matches`]) are
+/// `RoaringBitmap`s of `u32`. A row past them (only a lazy provider has that many) is never
+/// selected, highlighted, or expanded: selecting it does nothing, and selecting every row selects
+/// the first `2^32`. No row is ever stored as another (see [`row_bit`]).
+pub const BITMAP_ROWS: u64 = 1 << 32;
+
+/// A row's bit in the table's bitmaps, or `None` for a row past [`BITMAP_ROWS`].
+///
+/// Every bitmap access goes through this, so a row past them is left out rather than truncated
+/// onto another row (row `2^32 + 5` is never row 5).
+#[must_use]
+#[inline]
+pub fn row_bit(row: usize) -> Option<u32> {
+    u32::try_from(row).ok()
+}
+
+/// The bits of rows `0..rows`, as far as the bitmaps reach ([`BITMAP_ROWS`]); `None` for no
+/// rows. Insert it with `RoaringBitmap::insert_range` to select every row there can be.
+#[must_use]
+pub fn row_bits(rows: usize) -> Option<RangeInclusive<u32>> {
+    let last = rows.checked_sub(1)?;
+    Some(0..=row_bit(last).unwrap_or(u32::MAX))
+}
+
+/// How many of the first `rows` rows have bits.
+pub(crate) fn rows_with_bits(rows: usize) -> usize {
+    usize::try_from(BITMAP_ROWS).map_or(rows, |limit| rows.min(limit))
+}
+
+/// The rows a table shows, in order: the provider row at each visible index.
+///
+/// A table with no filter and no sort (and no tree) shows every row in the provider's order,
+/// which is held as [`Self::All`] without a list, however many rows there are. Filtering,
+/// sorting, and flattening a tree make a list ([`Self::Rows`]); clearing the filters and the sort
+/// of a flat table returns it to [`Self::All`].
+///
+/// Read it with [`Self::get`], [`Self::position`], [`Self::iter`], and [`Self::iter_range`]; take a
+/// list to change with [`Self::to_mut`] (which makes one from [`Self::All`]), for instance to sort
+/// it with [`TableProvider::sort_active_rows`]
+/// (`provider.sort_active_rows(state.active_rows.to_mut(), column, ascending)`):
+///
+/// ```
+/// use egui_table_kit::state::{ActiveRows, TableState};
+///
+/// let mut state = TableState::new("table", 3);
+/// assert_eq!(state.active_rows, ActiveRows::All(3));
+/// assert_eq!(state.active_rows.get(1), Some(1));
+///
+/// state.active_rows.to_mut().reverse();
+/// assert_eq!(state.active_rows, [2, 1, 0]);
+/// assert_eq!(state.active_rows.position(2), Some(0));
+/// ```
+#[derive(Clone, Debug)]
+pub enum ActiveRows {
+    /// Rows `0..n` in the provider's order: visible index `i` shows row `i`.
+    All(usize),
+    /// The provider row at each visible index.
+    Rows(Vec<usize>),
+}
+
+impl Default for ActiveRows {
+    fn default() -> Self {
+        Self::All(0)
+    }
+}
+
+impl ActiveRows {
+    /// How many rows are shown.
+    #[must_use]
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::All(rows) => *rows,
+            Self::Rows(rows) => rows.len(),
+        }
+    }
+
+    /// Whether no row is shown.
+    #[must_use]
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether this is [`Self::All`]: every row in the provider's order, without a list. A list
+    /// that happens to be in order is not.
+    #[must_use]
+    #[inline]
+    pub const fn is_identity(&self) -> bool {
+        matches!(self, Self::All(_))
+    }
+
+    /// The provider row shown at `visible`.
+    #[must_use]
+    #[inline]
+    pub fn get(&self, visible: usize) -> Option<usize> {
+        match self {
+            Self::All(rows) => (visible < *rows).then_some(visible),
+            Self::Rows(rows) => rows.get(visible).copied(),
+        }
+    }
+
+    /// Where the provider row `row` is shown, if it is: at once for [`Self::All`], by a search
+    /// of the list otherwise (which tries `row` itself first).
+    #[must_use]
+    pub fn position(&self, row: usize) -> Option<usize> {
+        match self {
+            Self::All(rows) => (row < *rows).then_some(row),
+            Self::Rows(rows) => {
+                if rows.get(row) == Some(&row) {
+                    Some(row)
+                } else {
+                    rows.iter().position(|&shown| shown == row)
+                }
+            }
+        }
+    }
+
+    /// The provider rows shown, in order.
+    #[must_use]
+    pub fn iter(&self) -> ActiveRowsIter<'_> {
+        self.iter_range(0..self.len())
+    }
+
+    /// The provider rows shown at the visible indices `visible` (cut to the rows there are).
+    #[must_use]
+    pub fn iter_range(&self, visible: Range<usize>) -> ActiveRowsIter<'_> {
+        self.slice(visible).iter()
+    }
+
+    /// The provider rows shown at the visible indices `visible` (cut to the rows there are).
+    #[must_use]
+    pub fn slice(&self, visible: Range<usize>) -> VisibleRows<'_> {
+        let len = self.len();
+        let start = visible.start.min(len);
+        let end = visible.end.clamp(start, len);
+        match self {
+            Self::All(_) => VisibleRows::Identity(start..end),
+            Self::Rows(rows) => VisibleRows::Mapped(&rows[start..end]),
+        }
+    }
+
+    /// The list, to change: [`Self::All`] becomes the list of its rows first.
+    pub fn to_mut(&mut self) -> &mut Vec<usize> {
+        if let Self::All(rows) = *self {
+            *self = Self::Rows((0..rows).collect());
+        }
+        match self {
+            Self::Rows(rows) => rows,
+            Self::All(_) => unreachable!("made a list above"),
+        }
+    }
+
+    /// The list, if there is one ([`Self::Rows`]).
+    #[must_use]
+    pub fn as_slice(&self) -> Option<&[usize]> {
+        match self {
+            Self::All(_) => None,
+            Self::Rows(rows) => Some(rows),
+        }
+    }
+
+    /// The rows shown as a list (made for [`Self::All`]).
+    #[must_use]
+    pub fn into_vec(self) -> Vec<usize> {
+        match self {
+            Self::All(rows) => (0..rows).collect(),
+            Self::Rows(rows) => rows,
+        }
+    }
+
+    /// Shows no row.
+    pub fn clear(&mut self) {
+        match self {
+            Self::All(rows) => *rows = 0,
+            Self::Rows(rows) => rows.clear(),
+        }
+    }
+}
+
+impl PartialEq for ActiveRows {
+    /// Equal when the same rows are shown in the same order, list or not.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::All(a), Self::All(b)) => a == b,
+            (Self::Rows(a), Self::Rows(b)) => a == b,
+            (Self::All(_), Self::Rows(rows)) | (Self::Rows(rows), Self::All(_)) => {
+                self.len() == other.len() && rows.iter().enumerate().all(|(i, &row)| i == row)
+            }
+        }
+    }
+}
+
+impl Eq for ActiveRows {}
+
+impl PartialEq<[usize]> for ActiveRows {
+    fn eq(&self, other: &[usize]) -> bool {
+        match self {
+            Self::All(rows) => {
+                *rows == other.len() && other.iter().enumerate().all(|(i, &row)| i == row)
+            }
+            Self::Rows(rows) => rows.as_slice() == other,
+        }
+    }
+}
+
+impl<const N: usize> PartialEq<[usize; N]> for ActiveRows {
+    fn eq(&self, other: &[usize; N]) -> bool {
+        *self == other[..]
+    }
+}
+
+impl PartialEq<Vec<usize>> for ActiveRows {
+    fn eq(&self, other: &Vec<usize>) -> bool {
+        *self == other[..]
+    }
+}
+
+impl From<Vec<usize>> for ActiveRows {
+    fn from(rows: Vec<usize>) -> Self {
+        Self::Rows(rows)
+    }
+}
+
+impl FromIterator<usize> for ActiveRows {
+    fn from_iter<I: IntoIterator<Item = usize>>(rows: I) -> Self {
+        Self::Rows(rows.into_iter().collect())
+    }
+}
+
+impl<'a> IntoIterator for &'a ActiveRows {
+    type Item = usize;
+    type IntoIter = ActiveRowsIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// The provider rows of an [`ActiveRows`] or a [`VisibleRows`], in order.
+#[derive(Clone, Debug)]
+pub struct ActiveRowsIter<'a>(Inner<'a>);
+
+#[derive(Clone, Debug)]
+enum Inner<'a> {
+    Identity(Range<usize>),
+    Mapped(std::iter::Copied<std::slice::Iter<'a, usize>>),
+}
+
+impl<'a> ActiveRowsIter<'a> {
+    pub(crate) const fn identity(rows: Range<usize>) -> Self {
+        Self(Inner::Identity(rows))
+    }
+
+    pub(crate) fn mapped(rows: &'a [usize]) -> Self {
+        Self(Inner::Mapped(rows.iter().copied()))
+    }
+}
+
+impl Iterator for ActiveRowsIter<'_> {
+    type Item = usize;
+
+    #[inline]
+    fn next(&mut self) -> Option<usize> {
+        match &mut self.0 {
+            Inner::Identity(rows) => rows.next(),
+            Inner::Mapped(rows) => rows.next(),
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.0 {
+            Inner::Identity(rows) => rows.size_hint(),
+            Inner::Mapped(rows) => rows.size_hint(),
+        }
+    }
+
+    #[inline]
+    fn nth(&mut self, n: usize) -> Option<usize> {
+        match &mut self.0 {
+            Inner::Identity(rows) => rows.nth(n),
+            Inner::Mapped(rows) => rows.nth(n),
+        }
+    }
+}
+
+impl DoubleEndedIterator for ActiveRowsIter<'_> {
+    #[inline]
+    fn next_back(&mut self) -> Option<usize> {
+        match &mut self.0 {
+            Inner::Identity(rows) => rows.next_back(),
+            Inner::Mapped(rows) => rows.next_back(),
+        }
+    }
+}
+
+impl ExactSizeIterator for ActiveRowsIter<'_> {}
+
+impl FusedIterator for ActiveRowsIter<'_> {}
 
 #[derive(Debug)]
 pub enum FilterUpdate {
@@ -32,13 +342,17 @@ pub struct TableChanges {
 }
 
 /// Holds interactive visual properties for columns and selection structures.
+///
+/// Selection, expansion, highlights, and a tree's filter matches are bitmaps holding rows
+/// `0..2^32` ([`BITMAP_ROWS`]); a row past them is never selected, highlighted, or expanded.
 #[derive(Debug, Default)]
 pub struct TableState {
     pub id: CompactString,
     pub columns: Vec<ColumnState>,
     pub highlights: Highlights,
     pub highlights_changed: bool,
-    pub active_rows: Vec<usize>,
+    /// The provider row at each visible index (see [`ActiveRows`]).
+    pub active_rows: ActiveRows,
     pub selected_rows: RoaringBitmap,
     pub expanded_rows: RoaringBitmap,
     pub last_clicked_visible_index: Option<usize>,
@@ -49,6 +363,9 @@ pub struct TableState {
     // Row interaction, selection model and keyboard focus state
     pub selection_mode: crate::interaction::SelectionMode,
     pub focused_key: Option<egui::Id>,
+    /// Where the focused row was shown when it was focused: a hint, used only while the row
+    /// there still has [`Self::focused_key`].
+    pub focused_visible_index: Option<usize>,
     pub anchor_key: Option<egui::Id>,
 
     #[doc(hidden)]
@@ -64,10 +381,35 @@ impl TableState {
     pub fn new(id: impl Into<CompactString>, row_count: usize) -> Self {
         Self {
             id: id.into(),
-            active_rows: (0..row_count).collect(),
+            active_rows: ActiveRows::All(row_count),
             filter_cache_dirty: true, // Mark dirty initially to force first-frame population
             ..Default::default()
         }
+    }
+
+    /// Whether provider row `row` is selected (never, for a row past [`BITMAP_ROWS`]).
+    #[must_use]
+    pub fn is_selected(&self, row: usize) -> bool {
+        row_bit(row).is_some_and(|bit| self.selected_rows.contains(bit))
+    }
+
+    /// Whether provider row `row` is expanded (never, for a row past [`BITMAP_ROWS`]).
+    #[must_use]
+    pub fn is_expanded(&self, row: usize) -> bool {
+        row_bit(row).is_some_and(|bit| self.expanded_rows.contains(bit))
+    }
+
+    /// The active filters of the columns the provider can filter.
+    fn usable_filters(&self, provider: &dyn TableProvider) -> Vec<(usize, Filter)> {
+        let mut filters = self.get_filter_state();
+        filters.retain(|(column, _)| provider.can_filter(*column));
+        filters
+    }
+
+    /// The sort, if the provider can sort its column.
+    fn usable_sort(&self, provider: &dyn TableProvider) -> Option<(usize, bool)> {
+        self.get_sort_state()
+            .filter(|(column, _)| provider.can_sort(*column))
     }
 
     /// Accesses the active filter options defined for each column.
@@ -124,13 +466,18 @@ impl TableState {
     ) -> Result<(), TableError> {
         let anchor_row = self
             .last_clicked_visible_index
-            .and_then(|visible| self.active_rows.get(visible))
-            .copied();
+            .and_then(|visible| self.active_rows.get(visible));
         let changes = self.collect_responses(responses);
         let filter_update = changes.filter_update;
-        let sort_update = changes.sort_update;
-        let filter_state = changes.filter_state;
-        let sort_state = changes.sort_state;
+        // Columns the provider can't sort or filter take no part (their controls are hidden).
+        let sort_update = changes
+            .sort_update
+            .filter(|&column| provider.can_sort(column));
+        let mut filter_state = changes.filter_state;
+        filter_state.retain(|(column, _)| provider.can_filter(*column));
+        let sort_state = changes
+            .sort_state
+            .filter(|&(column, _)| provider.can_sort(column));
 
         if provider.is_tree() {
             if let Some(sort_col) = sort_update {
@@ -150,8 +497,8 @@ impl TableState {
             if self.filter_cache_dirty {
                 self.sorted_children_cache.clear();
                 self.flatten_tree(provider)?;
-                self.last_clicked_visible_index = anchor_row
-                    .and_then(|row| self.active_rows.iter().position(|index| *index == row));
+                self.last_clicked_visible_index =
+                    anchor_row.and_then(|row| self.active_rows.position(row));
             }
             return Ok(());
         }
@@ -167,7 +514,7 @@ impl TableState {
             }
 
             if let Some((sort_col, sort_up)) = sort_state {
-                provider.sort_active_rows(&mut self.active_rows, sort_col, sort_up)?;
+                provider.sort_active_rows(self.active_rows.to_mut(), sort_col, sort_up)?;
             }
             return Ok(());
         }
@@ -178,17 +525,19 @@ impl TableState {
             // Only apply flat filters if this is a flat table
             if !provider.is_tree() {
                 match update {
-                    FilterUpdate::Added(col, filter) => {
+                    FilterUpdate::Added(col, filter) if provider.can_filter(col) => {
                         self.apply_incremental_filter(provider, col, &filter)?;
                     }
-                    FilterUpdate::Removed(_) | FilterUpdate::Modified(_, _) => {
+                    FilterUpdate::Added(..)
+                    | FilterUpdate::Removed(_)
+                    | FilterUpdate::Modified(_, _) => {
                         self.apply_all_filters(provider, &filter_state)?;
                     }
                 }
             }
 
             if let Some((sort_col, sort_up)) = sort_state {
-                provider.sort_active_rows(&mut self.active_rows, sort_col, sort_up)?;
+                provider.sort_active_rows(self.active_rows.to_mut(), sort_col, sort_up)?;
             }
         } else if let Some(sort_col) = sort_update {
             self.sorted_children_cache.clear();
@@ -203,7 +552,7 @@ impl TableState {
                     column.sort_up = Some(new_sort_up);
 
                     // Apply the sorted indices to active_rows in the new direction
-                    provider.sort_active_rows(&mut self.active_rows, sort_col, new_sort_up)?;
+                    provider.sort_active_rows(self.active_rows.to_mut(), sort_col, new_sort_up)?;
                 } else {
                     self.apply_new_sort(provider, sort_col)?;
                 }
@@ -216,11 +565,16 @@ impl TableState {
     }
 
     /// Sets up a new sorting column constraint and sorts active elements.
+    ///
+    /// Does nothing for a column the provider can't sort ([`TableProvider::can_sort`]).
     pub fn apply_new_sort(
         &mut self,
         provider: &dyn TableProvider,
         sort_col: usize,
     ) -> Result<(), TableError> {
+        if !provider.can_sort(sort_col) {
+            return Ok(());
+        }
         for (i, column) in self.columns.iter_mut().enumerate() {
             column.sort_up = if i == sort_col { Some(true) } else { None };
         }
@@ -230,16 +584,38 @@ impl TableState {
             self.flatten_tree(provider)?;
             return Ok(());
         }
-        provider.sort_active_rows(&mut self.active_rows, sort_col, true)
+        provider.sort_active_rows(self.active_rows.to_mut(), sort_col, true)
     }
 
     /// Evaluates filtering constraints, resetting the active index map.
+    ///
+    /// Filters on columns the provider can't filter ([`TableProvider::can_filter`]) are left
+    /// out. With no filter left, every row is shown in order ([`ActiveRows::All`]) without asking
+    /// the provider ([`TableProvider::filter_rows`] isn't called).
     pub fn apply_all_filters(
         &mut self,
         provider: &dyn TableProvider,
         filters: &[(usize, Filter)],
     ) -> Result<(), TableError> {
-        self.active_rows = provider.filter_rows(self, filters)?;
+        let usable;
+        let filters = if filters
+            .iter()
+            .all(|(column, _)| provider.can_filter(*column))
+        {
+            filters
+        } else {
+            usable = filters
+                .iter()
+                .filter(|(column, _)| provider.can_filter(*column))
+                .cloned()
+                .collect::<Vec<_>>();
+            &usable
+        };
+        self.active_rows = if filters.is_empty() {
+            ActiveRows::All(provider.row_count())
+        } else {
+            ActiveRows::Rows(provider.filter_rows(self, filters)?)
+        };
         Ok(())
     }
 
@@ -249,7 +625,11 @@ impl TableState {
     /// filter pass and sort every frame.
     ///
     /// For tree providers this delegates to [`Self::flatten_tree`]; for flat tables
-    /// it reapplies the active filters and (if any) the current sort.
+    /// it reapplies the active filters and (if any) the current sort. A flat table with neither
+    /// shows every row in order ([`ActiveRows::All`]), without a list.
+    ///
+    /// Columns the provider can't filter or sort ([`TableProvider::can_filter`],
+    /// [`TableProvider::can_sort`]) take no part: their filters and sort are left out.
     pub fn refresh_view(&mut self, provider: &dyn TableProvider) -> Result<bool, TableError> {
         if !self.filter_cache_dirty {
             return Ok(false);
@@ -258,10 +638,10 @@ impl TableState {
         if provider.is_tree() {
             self.flatten_tree(provider)?;
         } else {
-            let filter_state = self.get_filter_state();
+            let filter_state = self.usable_filters(provider);
             self.apply_all_filters(provider, &filter_state)?;
-            if let Some((sort_col, sort_up)) = self.get_sort_state() {
-                provider.sort_active_rows(&mut self.active_rows, sort_col, sort_up)?;
+            if let Some((sort_col, sort_up)) = self.usable_sort(provider) {
+                provider.sort_active_rows(self.active_rows.to_mut(), sort_col, sort_up)?;
             }
         }
 
@@ -270,17 +650,22 @@ impl TableState {
     }
 
     /// Runs filter constraints incrementally across the already-filtered row set.
+    ///
+    /// Does nothing for a column the provider can't filter ([`TableProvider::can_filter`]).
     pub fn apply_incremental_filter(
         &mut self,
         provider: &dyn TableProvider,
         filter_col: usize,
         filter: &Filter,
     ) -> Result<(), TableError> {
+        if !provider.can_filter(filter_col) {
+            return Ok(());
+        }
         let mut new_active = Vec::with_capacity(self.active_rows.len());
 
         // Heuristic: If active rows are fewer than a threshold, look them up directly.
         if self.active_rows.len() < 1000 {
-            for &row_idx in &self.active_rows {
+            for row_idx in &self.active_rows {
                 if let Some(row) = provider.row_at(row_idx)? {
                     let highlight = self.highlights.get_usize(row_idx);
                     if let Some(cell) = row.cell(filter_col)
@@ -292,10 +677,22 @@ impl TableState {
             }
         } else {
             // Fallback to sequential scan if the active set is large
-            let active_set: RoaringBitmap = self.active_rows.iter().map(|&i| i as u32).collect();
+            let active_set = match &self.active_rows {
+                ActiveRows::All(_) => None,
+                ActiveRows::Rows(rows) => Some(
+                    rows.iter()
+                        .map(|&row| row as u64)
+                        .collect::<RoaringTreemap>(),
+                ),
+            };
+            let shown = self.active_rows.len();
             let mut row_idx = 0;
             provider.for_all_rows(&mut |row| {
-                if active_set.contains(row_idx as u32) {
+                let active = match &active_set {
+                    None => row_idx < shown,
+                    Some(set) => set.contains(row_idx as u64),
+                };
+                if active {
                     let highlight = self.highlights.get_usize(row_idx);
                     if let Some(cell) = row.cell(filter_col)
                         && filter.matches(&cell.0, highlight)
@@ -308,7 +705,7 @@ impl TableState {
             })?;
         }
 
-        self.active_rows = new_active;
+        self.active_rows = ActiveRows::Rows(new_active);
         Ok(())
     }
 
@@ -403,15 +800,18 @@ impl TableState {
                     && ui.ctx().data(|d| d.get_temp::<u64>(activation_id)) != Some(frame)
                 {
                     ui.ctx().data_mut(|d| d.insert_temp(activation_id, frame));
-                    if hierarchy.is_expanded {
-                        self.expanded_rows.remove(row_index as u32);
-                    } else {
-                        self.expanded_rows.insert(row_index as u32);
-                    }
+                    // A row past the bitmaps can't be expanded (see `BITMAP_ROWS`).
+                    if let Some(bit) = row_bit(row_index) {
+                        if hierarchy.is_expanded {
+                            self.expanded_rows.remove(bit);
+                        } else {
+                            self.expanded_rows.insert(bit);
+                        }
 
-                    self.sorted_children_cache.remove(&row_index);
-                    self.filter_cache_dirty = true;
-                    changed = true;
+                        self.sorted_children_cache.remove(&row_index);
+                        self.filter_cache_dirty = true;
+                        changed = true;
+                    }
                 }
             } else {
                 let dummy_arrow = egui::RichText::new("⏵").color(egui::Color32::TRANSPARENT);
@@ -430,6 +830,8 @@ impl TableState {
     }
 
     /// Evaluates clicks and modifier keys to update row selections using an optional precomputed visible index.
+    ///
+    /// A row past the bitmaps ([`BITMAP_ROWS`]) can't be selected: clicking it does nothing.
     pub fn handle_row_selection_at_visible(
         &mut self,
         modifiers: egui::Modifiers,
@@ -437,17 +839,13 @@ impl TableState {
         visible_index: Option<usize>,
     ) {
         let active_rows = &self.active_rows;
-        let row_idx_u32 = row_index as u32;
+        let Some(row_idx_u32) = row_bit(row_index) else {
+            return;
+        };
 
         let current_visible_pos = visible_index
-            .filter(|&idx| idx < active_rows.len() && active_rows[idx] == row_index)
-            .or_else(|| {
-                if row_index < active_rows.len() && active_rows[row_index] == row_index {
-                    Some(row_index)
-                } else {
-                    active_rows.iter().position(|&r| r == row_index)
-                }
-            });
+            .filter(|&idx| active_rows.get(idx) == Some(row_index))
+            .or_else(|| active_rows.position(row_index));
 
         if modifiers.command || modifiers.ctrl {
             if self.selected_rows.contains(row_idx_u32) {
@@ -463,9 +861,20 @@ impl TableState {
             {
                 let start = anchor_visible_pos.min(cur_pos);
                 let end = anchor_visible_pos.max(cur_pos);
-                for visible_idx in start..=end {
-                    if let Some(&actual_row_idx) = active_rows.get(visible_idx) {
-                        self.selected_rows.insert(actual_row_idx as u32);
+                let visible = start..end.saturating_add(1).min(active_rows.len());
+                if active_rows.is_identity() {
+                    // Rows are their visible indices: insert the range at once.
+                    if let Some(first) = row_bit(visible.start)
+                        && let Some(bits) = row_bits(visible.end)
+                        && first <= *bits.end()
+                    {
+                        self.selected_rows.insert_range(first..=*bits.end());
+                    }
+                } else {
+                    for actual_row_idx in active_rows.iter_range(visible) {
+                        if let Some(bit) = row_bit(actual_row_idx) {
+                            self.selected_rows.insert(bit);
+                        }
                     }
                 }
             }
@@ -495,27 +904,33 @@ impl TableState {
         self.filter_cache_dirty = false;
         self.filter_matches.clear();
 
-        let active_filters = self.get_filter_state();
+        let active_filters = self.usable_filters(provider);
         if active_filters.is_empty() {
             // Memory Optimization: populate the entire range in O(1) time
-            self.filter_matches.insert_range(0..row_count as u32);
+            if let Some(bits) = row_bits(row_count) {
+                self.filter_matches.insert_range(bits);
+            }
             return;
         }
 
-        // Single-pass O(N) reverse propagation of matching subtrees
-        for row_idx in (0..row_count).rev() {
+        // Single-pass O(N) reverse propagation of matching subtrees. Rows past the bitmaps
+        // never match (see `BITMAP_ROWS`).
+        for row_idx in (0..rows_with_bits(row_count)).rev() {
+            let Some(bit) = row_bit(row_idx) else {
+                continue;
+            };
             let highlight = self.highlights.get_usize(row_idx);
             let matches = provider.row_matches(self, row_idx, &active_filters, highlight);
 
             if matches {
-                self.filter_matches.insert(row_idx as u32);
+                self.filter_matches.insert(bit);
             }
 
             // Propagate match state upwards to parents
-            if self.filter_matches.contains(row_idx as u32)
-                && let Some(parent_idx) = provider.row_parent(row_idx)
+            if self.filter_matches.contains(bit)
+                && let Some(parent_bit) = provider.row_parent(row_idx).and_then(row_bit)
             {
-                self.filter_matches.insert(parent_idx as u32);
+                self.filter_matches.insert(parent_bit);
             }
         }
     }
@@ -525,7 +940,7 @@ impl TableState {
     /// Returns `Err(TableError::CorruptedState)` if a cycle or out-of-bounds row index is detected.
     pub fn flatten_tree(&mut self, provider: &dyn TableProvider) -> Result<(), TableError> {
         self.rebuild_tree_filter_cache(provider);
-        let mut active = Vec::with_capacity(provider.row_count());
+        let mut active = Vec::with_capacity(provider.row_count().min(4096));
         let mut stack = Vec::with_capacity(provider.row_count().min(64));
         if provider.row_count() > 0 {
             stack.push(0);
@@ -536,14 +951,16 @@ impl TableState {
                 if row >= provider.row_count() {
                     return Err(TableError::CorruptedState);
                 }
-                if !self.filter_matches.contains(row as u32) {
+                // A row past the bitmaps never matches, so it's never shown (see `BITMAP_ROWS`).
+                let Some(bit) = row_bit(row).filter(|&bit| self.filter_matches.contains(bit))
+                else {
                     continue;
-                }
-                if !visited.insert(row as u32) {
+                };
+                if !visited.insert(bit) {
                     return Err(TableError::CorruptedState);
                 }
                 active.push(row);
-                if !self.expanded_rows.contains(row as u32) {
+                if !self.expanded_rows.contains(bit) {
                     continue;
                 }
                 let children = if let Some(cached) = self.sorted_children_cache.get(&row) {
@@ -553,7 +970,7 @@ impl TableState {
                     if children.iter().any(|&child| child >= provider.row_count()) {
                         return Err(TableError::CorruptedState);
                     }
-                    if let Some((column, ascending)) = self.get_sort_state() {
+                    if let Some((column, ascending)) = self.usable_sort(provider) {
                         provider.sort_active_rows(&mut children, column, ascending)?;
                     }
                     let children = Arc::new(children);
@@ -569,7 +986,7 @@ impl TableState {
             self.filter_cache_dirty = true;
             self.sorted_children_cache.clear();
         } else {
-            self.active_rows = active;
+            self.active_rows = ActiveRows::Rows(active);
         }
         result
     }

@@ -133,6 +133,9 @@ pub struct Table {
     stick_to_bottom: bool,
     max_height: Option<f32>,
     max_rows: Option<u64>,
+
+    /// How many rows a full sizing pass lays out, at most, from the visible ones.
+    max_sizing_rows: Option<u64>,
 }
 
 impl Default for Table {
@@ -149,6 +152,7 @@ impl Default for Table {
             stick_to_bottom: false,
             max_height: None,
             max_rows: None,
+            max_sizing_rows: None,
         }
     }
 }
@@ -271,6 +275,17 @@ impl Table {
     #[inline]
     pub const fn max_rows(mut self, max_rows: u64) -> Self {
         self.max_rows = Some(max_rows);
+        self
+    }
+
+    /// Limits the rows a full sizing pass (the first frame of a table with auto-fitted columns)
+    /// lays out: with `Some(n)`, at most `n` of the visible rows, never every row. `None` (the
+    /// default) lays out every row, so columns fit all of their contents. Set it for tables whose
+    /// rows aren't all at hand.
+    #[must_use]
+    #[inline]
+    pub const fn max_sizing_rows(mut self, max_sizing_rows: Option<u64>) -> Self {
+        self.max_sizing_rows = max_sizing_rows;
         self
     }
 
@@ -1041,7 +1056,10 @@ impl TableSplitScrollDelegate<'_> {
         quadrant_cols: std::ops::Range<usize>,
         do_prefetch: bool,
     ) {
-        if quadrant_cols.is_empty() {
+        // A table whose columns are all sticky draws its cells in the other quadrant: tell the
+        // delegate about them all the same, before it draws any.
+        let no_columns = quadrant_cols.is_empty();
+        if no_columns && !do_prefetch {
             return;
         }
 
@@ -1079,8 +1097,16 @@ impl TableSplitScrollDelegate<'_> {
         let row_range = if self.table.num_rows == 0 || viewport.top() == viewport.bottom() {
             0..0
         } else if self.do_full_sizing_pass {
-            // We do the UI for all rows during a sizing pass, so we can auto-size rows and columns
-            0..self.table.num_rows
+            match self.table.max_sizing_rows {
+                // We do the UI for all rows during a sizing pass, so we can auto-size rows and columns
+                None => 0..self.table.num_rows,
+                // Rows that aren't all at hand: at most so many of the visible ones.
+                Some(max) => {
+                    let start = self.row_at(rows_top);
+                    let end = (self.row_at(rows_bottom) + 1).min(start.saturating_add(max));
+                    start..end
+                }
+            }
         } else {
             self.row_at(rows_top)..self.row_at(rows_bottom) + 1
         };
@@ -1098,6 +1124,9 @@ impl TableSplitScrollDelegate<'_> {
                 self.has_prefetched,
                 "TableSplitScrollDelegate::region_ui called without prefetch having happened"
             );
+        }
+        if no_columns {
+            return;
         }
 
         // If the table layout has not been properly initialized, don't display
@@ -1640,6 +1669,50 @@ mod tests {
             row.top(),
             region.top()
         );
+    }
+
+    /// The distinct rows laid out in the first frame of a table of `rows` rows with an
+    /// auto-fitted column (a full sizing pass), with its sizing rows limited as given.
+    fn rows_laid_out_first(rows: u64, max_sizing_rows: Option<u64>) -> usize {
+        let ctx = egui::Context::default();
+        let mut recorder = Recorder {
+            rows: BTreeMap::new(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                Table::new()
+                    .id_salt("sizing")
+                    .num_rows(rows)
+                    .max_sizing_rows(max_sizing_rows)
+                    .columns(vec![Column::new(100.0).auto_fit(true)])
+                    .headers([HeaderRow::new(HEADER)])
+                    .show(ui, &mut recorder);
+            },
+        );
+        output.textures_delta.clear();
+        recorder.rows.len()
+    }
+
+    #[test]
+    fn a_full_sizing_pass_lays_out_every_row_unless_limited() {
+        assert_eq!(
+            rows_laid_out_first(1_000, None),
+            1_000,
+            "every row, as before"
+        );
+        let limited = rows_laid_out_first(1_000, Some(5));
+        assert!(limited <= 20, "the visible rows only: {limited}");
+        // A billion rows: only what is in view.
+        let huge = rows_laid_out_first(1_000_000_000, Some(256));
+        assert!(huge <= 20, "{huge}");
+        assert!(huge > 0);
     }
 
     #[test]

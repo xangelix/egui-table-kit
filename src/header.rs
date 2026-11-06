@@ -64,6 +64,36 @@ pub(crate) fn text_row<R>(
     }
 }
 
+/// Which of a header cell's controls are offered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HeaderControls {
+    /// Sorting: the sort indicator, clicking the title, and the menu's "Toggle Sort".
+    pub sort: bool,
+    /// Filtering: the menu's text and highlight filters.
+    pub filter: bool,
+}
+
+impl HeaderControls {
+    /// Every control.
+    pub const ALL: Self = Self {
+        sort: true,
+        filter: true,
+    };
+
+    /// Sorting and filtering as given; with neither, the cell has no menu.
+    #[must_use]
+    pub const fn new(sort: bool, filter: bool) -> Self {
+        Self { sort, filter }
+    }
+}
+
+impl Default for HeaderControls {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
 /// Interactive header cell renderer; its title sits across the header's height as `align` says
 /// (as `ui.horizontal` places it, without one).
 #[allow(clippy::too_many_arguments)] // Each is one setting of the header's look.
@@ -77,6 +107,35 @@ pub fn show_header_cell_contents(
     anchor_mode: HeaderMenuAnchor,
     align: Option<egui::Align>,
 ) -> Result<ColResponse, TableError> {
+    show_header_cell_with_controls(
+        ui,
+        text,
+        sort_up,
+        previous_response,
+        org_colors,
+        user_colors,
+        anchor_mode,
+        align,
+        HeaderControls::ALL,
+    )
+}
+
+/// [`show_header_cell_contents`] offering only the `controls` given: a column that can't be
+/// sorted shows no sort indicator and doesn't sort when clicked, and one that can't be filtered
+/// has no filters in its menu (and no menu, if it can't be sorted either).
+#[allow(clippy::too_many_arguments)] // Each is one setting of the header's look.
+pub fn show_header_cell_with_controls(
+    ui: &mut egui::Ui,
+    text: &str,
+    sort_up: &Option<bool>,
+    previous_response: &ColResponse,
+    org_colors: &[[u8; 3]],
+    user_colors: &[[u8; 3]],
+    anchor_mode: HeaderMenuAnchor,
+    align: Option<egui::Align>,
+    controls: HeaderControls,
+) -> Result<ColResponse, TableError> {
+    let has_menu = controls.sort || controls.filter;
     let mut response = ColResponse {
         filtering: previous_response.filtering.clone(),
         ..Default::default()
@@ -111,7 +170,7 @@ pub fn show_header_cell_contents(
 
     // Direct pointer tracking for right-clicks to guarantee context menu activation
     let is_cell_hovered = ui.rect_contains_pointer(gapless_rect);
-    let right_clicked = is_cell_hovered && ui.input(|i| i.pointer.secondary_clicked());
+    let right_clicked = has_menu && is_cell_hovered && ui.input(|i| i.pointer.secondary_clicked());
     if right_clicked {
         egui::Popup::toggle_id(ui.ctx(), popup_id);
     }
@@ -120,10 +179,10 @@ pub fn show_header_cell_contents(
     let mut ellipsis_clicked = false;
 
     // Determine Overlay Dimensions & Active States
-    let has_filter = !response.filtering.is_empty();
+    let has_filter = controls.filter && !response.filtering.is_empty();
     let is_sorted = sort_up.is_some();
-    let show_ellipsis = has_filter || is_hovered || popup_open;
-    let show_sort = is_sorted || is_hovered;
+    let show_ellipsis = has_menu && (has_filter || is_hovered || popup_open);
+    let show_sort = controls.sort && (is_sorted || is_hovered);
 
     let right_padding = 8.0f32;
     let mut solid_width = 0.0f32;
@@ -278,7 +337,11 @@ pub fn show_header_cell_contents(
     }
 
     // Direct, collision-free left-click sorting
-    if is_cell_hovered && ui.input(|i| i.pointer.primary_clicked()) && !ellipsis_clicked {
+    if controls.sort
+        && is_cell_hovered
+        && ui.input(|i| i.pointer.primary_clicked())
+        && !ellipsis_clicked
+    {
         response.to_sort = true;
     }
 
@@ -306,22 +369,29 @@ pub fn show_header_cell_contents(
             ui.strong(t!("column-options"));
             ui.separator();
 
-            SearchBar::new(&t!("filter-text")).ui(ui, &mut response.filtering.search);
+            if controls.filter {
+                SearchBar::new(&t!("filter-text")).ui(ui, &mut response.filtering.search);
 
-            if (!org_colors.is_empty() || !user_colors.is_empty())
-                && HighlightFilter::new(&t!("new-highlight-filter"))
-                    .ui(
-                        ui,
-                        &mut response.filtering.highlight,
-                        org_colors,
-                        user_colors,
-                    )
-                    .is_err()
-            {
-                halt_error = Some(TableError::CorruptedState);
+                if (!org_colors.is_empty() || !user_colors.is_empty())
+                    && HighlightFilter::new(&t!("new-highlight-filter"))
+                        .ui(
+                            ui,
+                            &mut response.filtering.highlight,
+                            org_colors,
+                            user_colors,
+                        )
+                        .is_err()
+                {
+                    halt_error = Some(TableError::CorruptedState);
+                }
             }
 
-            ui.separator();
+            if !controls.sort {
+                return;
+            }
+            if controls.filter {
+                ui.separator();
+            }
 
             let sort_desc = match sort_up {
                 Some(true) => format!(" {}", t!("current-ascending")),

@@ -5,7 +5,22 @@ use egui::{Id, Modifiers, Rect, Response};
 
 use crate::error::TableError;
 use crate::operations::TableProvider;
-use crate::state::TableState;
+use crate::state::{ActiveRows, TableState, row_bit, rows_with_bits};
+
+/// Whether `row` can be selected: the provider allows it, and the bitmaps hold it
+/// (see [`crate::state::BITMAP_ROWS`]).
+fn selectable(provider: &dyn TableProvider, row: usize) -> bool {
+    row_bit(row).is_some() && provider.row_selectable(row)
+}
+
+/// The visible indices whose rows could be selectable: all of them for a list, the ones the
+/// bitmaps hold for every row in order (whose visible indices are their rows).
+fn selectable_span(rows: &ActiveRows) -> std::ops::Range<usize> {
+    match rows {
+        ActiveRows::All(count) => 0..rows_with_bits(*count),
+        ActiveRows::Rows(rows) => 0..rows.len(),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SelectionMode {
@@ -98,11 +113,13 @@ impl TableState {
             anchor: self.anchor_key.or_else(|| {
                 self.last_clicked_visible_index
                     .and_then(|v| self.active_rows.get(v))
-                    .map(|&r| provider.row_key(r))
+                    .map(|r| provider.row_key(r))
             }),
         }
     }
 
+    /// Restores a [`Self::capture_identity`] snapshot against `provider`. It asks every row's
+    /// key once, so it walks all of the provider's rows.
     pub fn restore_identity(
         &mut self,
         provider: &dyn TableProvider,
@@ -122,15 +139,17 @@ impl TableState {
             .filter_map(|key| indices.get(key))
             .copied()
             .filter(|&row| provider.row_selectable(row))
-            .map(|r| r as u32)
+            .filter_map(row_bit)
             .collect();
         self.expanded_rows = snapshot
             .expanded
             .iter()
             .filter_map(|key| indices.get(key))
-            .map(|&r| r as u32)
+            .copied()
+            .filter_map(row_bit)
             .collect();
         self.focused_key = snapshot.focused.filter(|key| indices.contains_key(key));
+        let focused_row = snapshot.focused.and_then(|key| indices.get(&key).copied());
         let anchor_row = snapshot.anchor.and_then(|key| indices.get(&key).copied());
         self.anchor_key = snapshot.anchor.filter(|key| indices.contains_key(key));
 
@@ -138,13 +157,8 @@ impl TableState {
         self.sorted_children_cache.clear();
         self.refresh_view(provider)?;
 
-        self.last_clicked_visible_index = anchor_row.and_then(|row| {
-            if row < self.active_rows.len() && self.active_rows[row] == row {
-                Some(row)
-            } else {
-                self.active_rows.iter().position(|&r| r == row)
-            }
-        });
+        self.last_clicked_visible_index = anchor_row.and_then(|row| self.active_rows.position(row));
+        self.focused_visible_index = focused_row.and_then(|row| self.active_rows.position(row));
 
         Ok(())
     }
@@ -159,6 +173,8 @@ impl TableState {
         self.select_row_at_visible(provider, row, None, modifiers, input);
     }
 
+    /// Selects (or focuses) `row` as `input` and `modifiers` say. A row the provider doesn't let
+    /// be selected, or one past the bitmaps ([`crate::state::BITMAP_ROWS`]), is left alone.
     pub fn select_row_at_visible(
         &mut self,
         provider: &dyn TableProvider,
@@ -167,14 +183,26 @@ impl TableState {
         modifiers: Modifiers,
         input: SelectionInput,
     ) {
-        if row >= provider.row_count() || !provider.row_selectable(row) {
+        if row >= provider.row_count() || !selectable(provider, row) {
             return;
         }
+        let Some(bit) = row_bit(row) else {
+            return;
+        };
 
         let key = provider.row_key(row);
         self.focused_key = Some(key);
+        self.focused_visible_index = visible_index
+            .filter(|&idx| self.active_rows.get(idx) == Some(row))
+            .or_else(|| {
+                // Immediate without a list; a list is searched only below, where it was before.
+                self.active_rows
+                    .is_identity()
+                    .then(|| self.active_rows.position(row))
+                    .flatten()
+            });
 
-        let selected = self.selected_rows.contains(row as u32);
+        let selected = self.selected_rows.contains(bit);
         if matches!(input, SelectionInput::Drag | SelectionInput::Context) && selected {
             return;
         }
@@ -187,48 +215,38 @@ impl TableState {
         }
 
         let current = visible_index
-            .filter(|&idx| idx < self.active_rows.len() && self.active_rows[idx] == row)
-            .or_else(|| {
-                if row < self.active_rows.len() && self.active_rows[row] == row {
-                    Some(row)
-                } else {
-                    self.active_rows.iter().position(|&r| r == row)
-                }
-            });
+            .filter(|&idx| self.active_rows.get(idx) == Some(row))
+            .or_else(|| self.active_rows.position(row));
         let toggle = modifiers.command || modifiers.ctrl;
 
         if matches!(input, SelectionInput::Context) {
             self.selected_rows.clear();
-            self.selected_rows.insert(row as u32);
+            self.selected_rows.insert(bit);
             self.anchor_key = Some(key);
             self.last_clicked_visible_index = current;
         } else if modifiers.shift {
-            let anchor = self.anchor_key.and_then(|key| {
-                if let Some(idx) = self.last_clicked_visible_index
-                    && idx < self.active_rows.len()
-                    && provider.row_key(self.active_rows[idx]) == key
-                {
-                    Some(idx)
-                } else {
-                    self.active_rows
-                        .iter()
-                        .position(|&r| provider.row_key(r) == key)
-                }
-            });
+            let anchor = self
+                .anchor_key
+                .and_then(|key| self.locate_key(provider, key));
 
             if !toggle {
                 self.selected_rows.clear();
             }
 
             if let (Some(anchor), Some(current)) = (anchor, current) {
-                for &row in &self.active_rows[anchor.min(current)..=anchor.max(current)] {
-                    if provider.row_selectable(row) {
-                        self.selected_rows.insert(row as u32);
+                let span = selectable_span(&self.active_rows);
+                let start = anchor.min(current);
+                let end = anchor.max(current).saturating_add(1).min(span.end);
+                for row in self.active_rows.iter_range(start..end) {
+                    if selectable(provider, row)
+                        && let Some(bit) = row_bit(row)
+                    {
+                        self.selected_rows.insert(bit);
                     }
                 }
                 self.last_clicked_visible_index = Some(anchor);
             } else {
-                self.selected_rows.insert(row as u32);
+                self.selected_rows.insert(bit);
                 self.anchor_key = Some(key);
                 self.last_clicked_visible_index = current;
             }
@@ -236,18 +254,65 @@ impl TableState {
             // Ctrl/Cmd+arrows move the focus without changing the selection.
         } else if toggle {
             if selected {
-                self.selected_rows.remove(row as u32);
+                self.selected_rows.remove(bit);
             } else {
-                self.selected_rows.insert(row as u32);
+                self.selected_rows.insert(bit);
             }
             self.anchor_key = Some(key);
             self.last_clicked_visible_index = current;
         } else {
             self.selected_rows.clear();
-            self.selected_rows.insert(row as u32);
+            self.selected_rows.insert(bit);
             self.anchor_key = Some(key);
             self.last_clicked_visible_index = current;
         }
+    }
+
+    /// Where the row with `key` is shown: at the last clicked or the focused visible index if
+    /// it's there, or else found by asking each shown row's key. A lazy provider's rows aren't
+    /// walked ([`TableProvider::is_lazy`]): there, a row at neither index isn't found.
+    fn locate_key(&self, provider: &dyn TableProvider, key: Id) -> Option<usize> {
+        for hint in [self.last_clicked_visible_index, self.focused_visible_index]
+            .into_iter()
+            .flatten()
+        {
+            if self
+                .active_rows
+                .get(hint)
+                .is_some_and(|row| provider.row_key(row) == key)
+            {
+                return Some(hint);
+            }
+        }
+        if provider.is_lazy() {
+            return None;
+        }
+        self.active_rows
+            .iter()
+            .position(|row| provider.row_key(row) == key)
+    }
+
+    /// The first (or, `forward` false, the last) visible index in `visible` whose row can be
+    /// selected.
+    fn find_selectable(
+        &self,
+        provider: &dyn TableProvider,
+        visible: std::ops::Range<usize>,
+        forward: bool,
+    ) -> Option<usize> {
+        let span = selectable_span(&self.active_rows);
+        let start = visible.start.max(span.start);
+        let end = visible.end.min(span.end);
+        if start >= end {
+            return None;
+        }
+        let mut rows = self.active_rows.iter_range(start..end);
+        let found = if forward {
+            rows.position(|r| selectable(provider, r))
+        } else {
+            rows.rposition(|r| selectable(provider, r))
+        };
+        found.map(|offset| start + offset)
     }
 
     /// Move relative to the focused row, or to an endpoint for `isize::MIN/MAX`.
@@ -262,43 +327,21 @@ impl TableState {
             return None;
         }
 
-        let current_vis_idx = self.focused_key.and_then(|key| {
-            if let Some(last) = self.last_clicked_visible_index
-                && last < self.active_rows.len()
-                && provider.row_key(self.active_rows[last]) == key
-            {
-                Some(last)
-            } else {
-                self.active_rows
-                    .iter()
-                    .position(|&r| provider.row_key(r) == key)
-            }
-        });
+        let current_vis_idx = self
+            .focused_key
+            .and_then(|key| self.locate_key(provider, key));
 
+        let all = 0..self.active_rows.len();
         let target_vis_idx = match delta {
-            isize::MIN => self
-                .active_rows
-                .iter()
-                .position(|&r| provider.row_selectable(r)),
-            isize::MAX => self
-                .active_rows
-                .iter()
-                .rposition(|&r| provider.row_selectable(r)),
+            isize::MIN => self.find_selectable(provider, all, true),
+            isize::MAX => self.find_selectable(provider, all, false),
             0 => current_vis_idx,
             _ => {
                 let start = match current_vis_idx {
                     Some(cur) => cur,
                     None => {
-                        let pos = if delta < 0 {
-                            self.active_rows
-                                .iter()
-                                .rposition(|&r| provider.row_selectable(r))?
-                        } else {
-                            self.active_rows
-                                .iter()
-                                .position(|&r| provider.row_selectable(r))?
-                        };
-                        let row = self.active_rows[pos];
+                        let pos = self.find_selectable(provider, all, delta > 0)?;
+                        let row = self.active_rows.get(pos)?;
                         self.select_row_at_visible(
                             provider,
                             row,
@@ -314,14 +357,9 @@ impl TableState {
                 let mut remaining = delta.unsigned_abs();
                 while remaining > 0 {
                     let next = if delta > 0 {
-                        self.active_rows[target + 1..]
-                            .iter()
-                            .position(|&r| provider.row_selectable(r))
-                            .map(|rel| target + 1 + rel)
+                        self.find_selectable(provider, target + 1..all.end, true)
                     } else {
-                        self.active_rows[..target]
-                            .iter()
-                            .rposition(|&r| provider.row_selectable(r))
+                        self.find_selectable(provider, 0..target, false)
                     };
 
                     match next {
@@ -337,7 +375,7 @@ impl TableState {
         };
 
         let target_vis_idx = target_vis_idx?;
-        let row = self.active_rows[target_vis_idx];
+        let row = self.active_rows.get(target_vis_idx)?;
         self.select_row_at_visible(
             provider,
             row,
@@ -348,13 +386,15 @@ impl TableState {
         Some(target_vis_idx)
     }
 
+    /// Selects every shown row that can be selected (the bitmaps hold rows `0..2^32`, see
+    /// [`crate::state::BITMAP_ROWS`]).
     pub fn select_all_visible(&mut self, provider: &dyn TableProvider) {
+        let span = selectable_span(&self.active_rows);
         self.selected_rows = self
             .active_rows
-            .iter()
-            .copied()
-            .filter(|&r| provider.row_selectable(r))
-            .map(|r| r as u32)
+            .iter_range(span)
+            .filter(|&r| selectable(provider, r))
+            .filter_map(row_bit)
             .collect();
     }
 

@@ -124,7 +124,7 @@ impl TableProvider for Data {
         Some(crate::operations::RowHierarchy {
             indent_level: usize::from(row != 0),
             has_children: row == 0,
-            is_expanded: state.expanded_rows.contains(row as u32),
+            is_expanded: state.is_expanded(row),
         })
     }
 }
@@ -145,7 +145,7 @@ fn explorer_selection_anchors_follow_identity_through_sort_and_snapshot_replacem
     assert_eq!(state.selected_rows.iter().collect::<Vec<_>>(), [1]);
 
     state.select_row(&data, 3, Modifiers::COMMAND, SelectionInput::Click);
-    state.active_rows.reverse();
+    state.active_rows.to_mut().reverse();
     state.select_row(&data, 2, Modifiers::SHIFT, SelectionInput::Click);
     assert_eq!(state.selected_rows.iter().collect::<Vec<_>>(), [2, 3]);
 
@@ -419,7 +419,7 @@ fn test_move_focus_navigation_and_boundaries() {
         ..Default::default()
     };
     let mut state = explorer();
-    state.active_rows = vec![0, 1, 2, 3];
+    state.active_rows = vec![0, 1, 2, 3].into();
 
     // Case 1: Unfocused initial navigation
     let first = state.move_focus(&data, 1, Modifiers::NONE);
@@ -469,7 +469,7 @@ fn test_show_bypasses_geometry_and_event_allocations() {
 fn test_handle_row_selection_at_visible_legacy_mode() {
     let mut state = TableState::new("test", 5);
     state.selection_mode = SelectionMode::Legacy;
-    state.active_rows = vec![0, 1, 2, 3, 4];
+    state.active_rows = vec![0, 1, 2, 3, 4].into();
 
     // Single click selects row
     state.handle_row_selection_at_visible(Modifiers::NONE, 1, Some(1));
